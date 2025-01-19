@@ -1,4 +1,3 @@
-
 import { exec, toast } from 'kernelsu';
 
 document.addEventListener('DOMContentLoaded', async () => {
@@ -18,6 +17,11 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // 初始化 Chart.js 环形图
     const segmentChartCtx = document.getElementById('segment-chart').getContext('2d');
+
+    // 检测深色模式
+    const isDarkMode = window.matchMedia('(prefers-color-scheme: dark)').matches;
+
+    // 根据深色模式设置环形图的边框颜色
     const segmentChart = new Chart(segmentChartCtx, {
         type: 'doughnut', // 环形图
         data: {
@@ -25,6 +29,8 @@ document.addEventListener('DOMContentLoaded', async () => {
             datasets: [{
                 data: [0, 0],
                 backgroundColor: ['#ff6384', '#36a2eb'],
+                borderColor: isDarkMode ? '#2A2A2A' : '#f8f9fa', // 根据深色模式设置边框颜色
+                borderWidth: 1, // 设置边框宽度
             }],
         },
         options: {
@@ -33,13 +39,35 @@ document.addEventListener('DOMContentLoaded', async () => {
             plugins: {
                 legend: {
                     position: 'bottom', // 图例位置
+                    labels: {
+                        color: isDarkMode ? '#f8f9fa' : '#2A2A2A', // 根据深色模式设置图例文字颜色
+                    },
                 },
                 tooltip: {
                     enabled: true, // 启用提示
+                    backgroundColor: isDarkMode ? '#333333' : '#f8f9fa', // 根据深色模式设置提示框背景色
+                    titleColor: isDarkMode ? '#f8f9fa' : '#2A2A2A', // 根据深色模式设置提示框标题颜色
+                    bodyColor: isDarkMode ? '#f8f9fa' : '#2A2A2A', // 根据深色模式设置提示框内容颜色
                 },
             },
         },
     });
+
+    // 监听系统主题变化
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (e) => {
+        const isDarkMode = e.matches;
+        updateChartTheme(isDarkMode);
+    });
+
+    // 更新图表主题
+    function updateChartTheme(isDarkMode) {
+        segmentChart.data.datasets[0].borderColor = isDarkMode ? '#2A2A2A' : '#f8f9fa'; // 更新边框颜色
+        segmentChart.options.plugins.legend.labels.color = isDarkMode ? '#f8f9fa' : '#2A2A2A'; // 更新图例文字颜色
+        segmentChart.options.plugins.tooltip.backgroundColor = isDarkMode ? '#333333' : '#f8f9fa'; // 更新提示框背景色
+        segmentChart.options.plugins.tooltip.titleColor = isDarkMode ? '#f8f9fa' : '#2A2A2A'; // 更新提示框标题颜色
+        segmentChart.options.plugins.tooltip.bodyColor = isDarkMode ? '#f8f9fa' : '#2A2A2A'; // 更新提示框内容颜色
+        segmentChart.update(); // 更新图表
+    }
 
     // 加载日志文件
     async function loadLogFile() {

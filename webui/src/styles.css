@@ -1,5 +1,5 @@
 body {
-    background-color: #f8f9fa;
+    background-color: #F2F2F2;
 }
 
 .card {
@@ -48,4 +48,22 @@ body {
     max-width: 200px; /* 缩小图形大小 */
     max-height: 200px;
     margin: 0 auto;
+}
+
+/* 深色模式样式 */
+@media (prefers-color-scheme: dark) {
+    body {
+        background-color: #1e1e1e;
+        color: #BFFFFFFF;
+    }
+
+    .log-content {
+        background-color: #2A2A2A;
+        color: #BEFFFFFF;
+    }
+
+    .card {
+        background-color: #2d2d2d;
+        color: #BFFFFFFF;
+    }
 }
