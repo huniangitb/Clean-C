@@ -140,6 +140,7 @@ static int filename_matches(const char *filename, const char **patterns, int cou
     }
     return 0;
 }
+
 /**
  * 检查路径是否在白名单中
  * @param path: 要检查的路径
@@ -338,6 +339,7 @@ void delete_directory_recursive(const char *path, char **whitelist, int wl_count
     }
     closedir(dir);
 }
+
 /**
  * 统一黑名单处理函数
  * @param blacklist: 黑名单数组
@@ -475,6 +477,8 @@ int main(int argc, char *argv[]) {
             case 'h':
                 printf("用法: %s <blacklist1> <blacklist2> <whitelist> <天数> "
                        "[-s seconds] [-d debug_level]\n", argv[0]);
+                printf("或者: %s <blacklist1> <whitelist> "
+                       "[-s seconds] [-d debug_level]\n", argv[0]);
                 return EXIT_SUCCESS;
             default:
                 return EXIT_FAILURE;
@@ -482,19 +486,24 @@ int main(int argc, char *argv[]) {
     }
 
     /* 检查必需参数 */
-    if (argc - optind < 4) {
+    if (argc - optind < 2) {  // 改为2,只要求blacklist1和whitelist
         fprintf(stderr, "参数不足\n");
         return EXIT_FAILURE;
     }
 
     char *blacklist1_file = argv[optind];
-    char *blacklist2_file = argv[optind+1];
-    char *whitelist_file = argv[optind+2];
-    int days = atoi(argv[optind+3]);
+    char *whitelist_file = argv[optind+1];
+    int days = 0;
+    char *blacklist2_file = NULL;
 
-    if (days < 0) {
-        fprintf(stderr, "无效的天数\n");
-        return EXIT_FAILURE;
+    /* 如果有额外参数,可能是blacklist2和days */
+    if (argc - optind >= 4) {
+        blacklist2_file = argv[optind+2];
+        days = atoi(argv[optind+3]);
+        if (days < 0) {
+            fprintf(stderr, "无效的天数\n");
+            return EXIT_FAILURE;
+        }
     }
 
     /* 主循环 */
@@ -517,12 +526,18 @@ int main(int argc, char *argv[]) {
         /* 读取配置文件 */
         char **blacklist1 = NULL, **blacklist2 = NULL, **whitelist = NULL;
         int bl1_count = read_file_to_array(blacklist1_file, &blacklist1);
-        int bl2_count = read_file_to_array(blacklist2_file, &blacklist2);
+        int bl2_count = 0;
         int wl_count = read_file_to_array(whitelist_file, &whitelist);
+
+        if (blacklist2_file) {
+            bl2_count = read_file_to_array(blacklist2_file, &blacklist2);
+        }
 
         /* 处理黑名单 */
         process_blacklist1(blacklist1, bl1_count, whitelist, wl_count);
-        process_blacklist2(blacklist2, bl2_count, whitelist, wl_count, days);
+        if (blacklist2_file) {
+            process_blacklist2(blacklist2, bl2_count, whitelist, wl_count, days);
+        }
 
         /* 清理资源 */
         free_array(blacklist1, bl1_count);
