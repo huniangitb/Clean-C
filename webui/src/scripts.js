@@ -1,7 +1,15 @@
-import { exec, toast } from 'kernelsu';
+import { exec, spawn, toast } from 'kernelsu';
+import { parseLogContent, updateLocalStorage, getStoredData, clearStoredData } from './logParser.js';
+import { Ripple, initMDB } from 'mdb-ui-kit/js/mdb.es.min.js'; // Import needed modules
+import Chart from 'chart.js/auto';
+window.Ripple = Ripple;
 
+initMDB({ Ripple })
+//import VConsole from 'vconsole';
+//const vConsole = new VConsole();
 document.addEventListener('DOMContentLoaded', async () => {
-    const logContent = document.getElementById('log-content');
+    // 全局变量声明
+    let isExt4 = false;
     const configForm = document.getElementById('config-form');
     const retentionDaysInput = document.getElementById('retention-days');
     const cleanIntervalInput = document.getElementById('clean-interval');
@@ -10,10 +18,57 @@ document.addEventListener('DOMContentLoaded', async () => {
     const editWhitelistBtn = document.getElementById('edit-whitelist');
     const refreshLogBtn = document.getElementById('refresh-log');
     const deleteLogBtn = document.getElementById('delete-log');
+    const clearDataBtn = document.getElementById('clear-data');
     const restartModuleBtn = document.getElementById('restart-module');
     const f2fsGcToggle = document.getElementById('f2fs-gc-toggle');
     const f2fsGcToggleLabel = document.getElementById('f2fs-gc-toggle-label');
     const gcStatusSpan = document.getElementById('gc-status');
+    const dateSelect = document.getElementById('date-select');
+    const segmentChartContainer = document.getElementById('segment-chart').parentElement;
+    const f2fsGcContainer = document.getElementById('f2fs-gc-container');
+    const gcControlLabel = document.getElementById('gc-control-label'); // 新增标签元素
+
+// 检查文件系统类型并更新UI
+async function checkFileSystem() {
+    let fsType = null; // 在函数开始时初始化 fsType
+
+    try {
+        const { errno, stdout, stderr } = await exec(`mount | grep " /data " | awk '{print $5}'`);
+        if (errno === 0) {
+            fsType = stdout.trim(); // 在 try 块中赋值
+            isExt4 = fsType === 'ext4';
+        } else {
+            throw new Error(stderr || '执行命令失败');
+        }
+
+        // 更新元素显示状态
+        if (segmentChartContainer && f2fsGcContainer && gcStatusSpan) {
+            segmentChartContainer.style.display = isExt4 ? 'none' : 'block';
+            f2fsGcContainer.style.display = 'block'; // 始终显示容器
+            gcStatusSpan.closest('p').style.display = isExt4 ? 'none' : 'block';
+            
+            // 更新标签和样式
+            f2fsGcToggleLabel.textContent = isExt4 ? 'EXT4碎片整理' : 'f2fs垃圾回收';
+            f2fsGcToggleLabel.classList.toggle('btn-outline-secondary', !isExt4);
+            f2fsGcToggleLabel.classList.toggle('btn-success', isExt4);
+        }
+
+        // 更新控制标签文本
+        gcControlLabel.textContent = isExt4 ? 'EXT4碎片整理' : 'f2fs垃圾回收';
+    } catch (error) {
+        toast(`检查文件系统失败: ${error.message}`);
+    }
+
+    return fsType; // 返回 fsType，即使发生错误
+}
+
+    // 表单提交事件
+    configForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const retentionDays = retentionDaysInput.value;
+        const cleanInterval = cleanIntervalInput.value;
+        await saveConfigFile(retentionDays, cleanInterval);
+    });
 
     // 初始化 Chart.js 环形图
     const segmentChartCtx = document.getElementById('segment-chart').getContext('2d');
@@ -53,6 +108,53 @@ document.addEventListener('DOMContentLoaded', async () => {
         },
     });
 
+    // 初始化柱状图
+    const barChartCtx = document.getElementById('bar-chart').getContext('2d');
+    const barChart = new Chart(barChartCtx, {
+        type: 'bar',
+        data: {
+            labels: [], // 日期
+            datasets: [
+                {
+                    label: '已删除文件数',
+                    data: [],
+                    backgroundColor: 'rgba(255, 99, 132, 0.2)',
+                    borderColor: 'rgba(255, 99, 132, 1)',
+                    borderWidth: 1,
+                },
+                {
+                    label: '已删除目录数',
+                    data: [],
+                    backgroundColor: 'rgba(54, 162, 235, 0.2)',
+                    borderColor: 'rgba(54, 162, 235, 1)',
+                    borderWidth: 1,
+                },
+                // 动态添加/移除脏段数据集
+                ...(!isExt4 ? [{
+                    label: '脏段',
+                    data: [],
+                    backgroundColor: 'rgba(75, 192, 192, 0.2)',
+                    borderColor: 'rgba(75, 192, 192, 1)',
+                    borderWidth: 1,
+                }] : []),
+                {
+                    label: '裁剪数据 (MB)',
+                    data: [],
+                    backgroundColor: 'rgba(153, 102, 255, 0.2)',
+                    borderColor: 'rgba(153, 102, 255, 1)',
+                    borderWidth: 1,
+                },
+            ],
+        },
+        options: {
+            scales: {
+                y: {
+                    beginAtZero: true,
+                },
+            },
+        },
+    });
+
     // 监听系统主题变化
     window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (e) => {
         const isDarkMode = e.matches;
@@ -61,260 +163,397 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // 更新图表主题
     function updateChartTheme(isDarkMode) {
-        segmentChart.data.datasets[0].borderColor = isDarkMode ? '#2A2A2A' : '#f8f9fa'; // 更新边框颜色
-        segmentChart.options.plugins.legend.labels.color = isDarkMode ? '#f8f9fa' : '#2A2A2A'; // 更新图例文字颜色
-        segmentChart.options.plugins.tooltip.backgroundColor = isDarkMode ? '#333333' : '#f8f9fa'; // 更新提示框背景色
-        segmentChart.options.plugins.tooltip.titleColor = isDarkMode ? '#f8f9fa' : '#2A2A2A'; // 更新提示框标题颜色
-        segmentChart.options.plugins.tooltip.bodyColor = isDarkMode ? '#f8f9fa' : '#2A2A2A'; // 更新提示框内容颜色
-        segmentChart.update(); // 更新图表
+        segmentChart.data.datasets[0].borderColor = isDarkMode ? '#2A2A2A' : '#f8f9fa';
+        segmentChart.options.plugins.legend.labels.color = isDarkMode ? '#f8f9fa' : '#2A2A2A';
+        segmentChart.options.plugins.tooltip.backgroundColor = isDarkMode ? '#333333' : '#f8f9fa';
+        segmentChart.options.plugins.tooltip.titleColor = isDarkMode ? '#f8f9fa' : '#2A2A2A';
+        segmentChart.options.plugins.tooltip.bodyColor = isDarkMode ? '#f8f9fa' : '#2A2A2A';
+        segmentChart.update();
+    }
+
+    // 初始化日期选择器
+    async function getCurrentDate() {
+        try {
+            const { errno, stdout, stderr } = await exec('date +"%F"');
+            if (errno === 0) {
+                return stdout.trim();
+            } else {
+                throw new Error(`执行 date 命令失败: ${stderr}`);
+            }
+        } catch (error) {
+            toast(`获取当前日期失败: ${error.message}`);
+            return null;
+        }
+    }
+
+    async function initDatePicker() {
+        try {
+            const currentDateStr = await getCurrentDate();
+            if (!currentDateStr) {
+                throw new Error('无法获取当前日期');
+            }
+
+            const today = new Date(currentDateStr);
+            const sixDaysAgo = new Date(today);
+            sixDaysAgo.setDate(today.getDate() - 6);
+
+            const formatDate = (date) => {
+                const year = date.getFullYear();
+                const month = String(date.getMonth() + 1).padStart(2, '0');
+                const day = String(date.getDate()).padStart(2, '0');
+                return `${year}-${month}-${day}`;
+            };
+
+            dateSelect.min = formatDate(sixDaysAgo);
+            dateSelect.max = formatDate(today);
+            dateSelect.value = formatDate(today);
+
+            dateSelect.addEventListener('change', () => {
+                updateBarChart();
+            });
+        } catch (error) {
+            toast(`初始化日期选择器失败: ${error.message}`);
+        }
     }
 
     // 加载日志文件
     async function loadLogFile() {
         try {
-            const { errno, stdout, stderr } = await exec('cat /data/adb/modules/Clean-C/log.txt');
+            const { errno, stdout, stderr } = await exec('cat /data/adb/modules/Clean-C/run.log');
             if (errno === 0) {
-                logContent.innerHTML = highlightNumbers(stdout);
-                logContent.scrollTop = logContent.scrollHeight;
+                const parsedData = parseLogContent(stdout);
+                updateLocalStorage(parsedData);
+                updateBarChart();
             } else {
-                toast(`错误: ${stderr}`);
+                throw new Error(`读取日志失败: ${stderr}`);
             }
         } catch (error) {
             toast(`加载日志失败: ${error.message}`);
         }
     }
 
-    // 高亮显示数字
-    function highlightNumbers(text) {
-        return text.replace(/\b\d+\b/g, '<span class="highlight">$&</span>');
+    // 更新柱状图
+    function updateBarChart() {
+        const storedData = getStoredData();
+        const selectedDate = dateSelect.value;
+
+        const filteredData = selectedDate
+            ? storedData.filter(entry => entry.date === selectedDate)
+            : storedData;
+
+        const aggregatedData = {};
+        filteredData.forEach(entry => {
+            if (!aggregatedData[entry.date]) {
+                aggregatedData[entry.date] = {
+                    deletedFiles: 0,
+                    deletedDirs: 0,
+                    dirtySegments: isExt4 ? undefined : 0, // 不统计ext4的脏段
+                    trimmedMB: 0
+                };
+            }
+            aggregatedData[entry.date].deletedFiles += entry.deletedFiles;
+            aggregatedData[entry.date].deletedDirs += entry.deletedDirs;
+            if (!isExt4) aggregatedData[entry.date].dirtySegments += entry.dirtySegments;
+            aggregatedData[entry.date].trimmedMB += entry.trimmedMB;
+        });
+        // 更新数据集时排除脏段数据
+        barChart.data.datasets.forEach(dataset => {
+            if (dataset.label === '脏段') dataset.hidden = isExt4;
+        });
+        barChart.update();
+        const dates = Object.keys(aggregatedData);
+        const deletedFiles = dates.map(date => aggregatedData[date].deletedFiles);
+        const deletedDirs = dates.map(date => aggregatedData[date].deletedDirs);
+        const dirtySegments = dates.map(date => aggregatedData[date].dirtySegments);
+        const trimmedMB = dates.map(date => aggregatedData[date].trimmedMB);
+
+        barChart.data.labels = dates;
+        barChart。data。datasets[0]。data = deletedFiles;
+        barChart。data。datasets[1]。data = deletedDirs;
+        barChart。data。datasets[2]。data = dirtySegments;
+        barChart。data。datasets[3]。data = trimmedMB;
+        barChart。update();
     }
+
+    // 清除数据
+    clearDataBtn。addEventListener('click'， () => {
+        clearStoredData();
+        updateBarChart();
+        toast('数据已清除');
+    });
+
+    // 监听日期选择变化
+    dateSelect。addEventListener('change'， () => {
+        updateBarChart();
+    });
 
     // 加载配置文件
     async function loadConfigFile() {
-        try {
-            const { errno, stdout, stderr } = await exec('cat /storage/emulated/0/Android/清理规则/配置.txt');
-            if (errno === 0) {
-                const config = parseConfig(stdout);
-                retentionDaysInput.value = config.retentionDays || 30; // 默认值 30
-                cleanIntervalInput.value = config.cleanInterval || 3600; // 默认值 3600
+    try {
+        const { errno， stdout， stderr } = await exec('cat /data/media/0/Android/清理规则/配置.txt');
+        if (errno === 0) {
+            const config = parseConfig(stdout);
+            
+            // 从配置文件读取默认值，如果没有则使用默认值
+            retentionDaysInput。value = config。保留天数 || '30';
+            cleanIntervalInput。value = config。程序清理间隔秒数 || '3600';
 
-                // 设置 f2fs垃圾回收 开关状态
-                if (config['f2fs-GC'] === 'y') {
-                    f2fsGcToggle.checked = true;
-                    f2fsGcToggleLabel.textContent = '已开启';
-                    f2fsGcToggleLabel.classList.remove('btn-outline-secondary');
-                    f2fsGcToggleLabel.classList.add('btn-success'); // 绿色
-                } else {
-                    f2fsGcToggle.checked = false;
-                    f2fsGcToggleLabel.textContent = '关闭';
-                    f2fsGcToggleLabel.classList.remove('btn-success');
-                    f2fsGcToggleLabel.classList.add('btn-outline-secondary'); // 灰色
-                }
+            // 读取f2fs-GC配置
+            const f2fsGcValue = config['f2fs-GC'];
+            f2fsGcToggle。checked = f2fsGcValue === 'y';
+            
+            // 更新开关状态和标签
+            if (f2fsGcValue === 'y') {
+                f2fsGcToggleLabel。textContent = '已开启';
+                f2fsGcToggleLabel。classList。remove('btn-outline-secondary');
+                f2fsGcToggleLabel。classList。add('btn-success');
             } else {
-                toast(`错误: ${stderr}`);
+                f2fsGcToggleLabel。textContent = '关闭';
+                f2fsGcToggleLabel。classList。remove('btn-success');
+                f2fsGcToggleLabel。classList。add('btn-outline-secondary');
             }
-        } catch (error) {
-            toast(`加载配置失败: ${error.message}`);
+        } else {
+            toast(`错误: ${stderr}`);
         }
+    } catch (error) {
+        toast(`加载配置失败: ${error。message}`);
     }
+}
 
     // 解析配置文件
     function parseConfig(text) {
-        const lines = text.split('\n');
-        const config = {};
-        lines.forEach(line => {
-            const [key, value] = line.split('=');
+    const config = {};
+    const lines = text。split('\n');
+    lines。forEach(line => {
+        if (line。includes('=')) {
+            const [key， value] = line。split('=')。map(item => item。trim());
             if (key && value) {
-                config[key.trim()] = value.trim();
+                config[key] = value;
             }
-        });
-        return config;
-    }
+        }
+    });
+    return config;
+}
 
     // 保存配置文件
-    async function saveConfigFile(retentionDays, cleanInterval) {
-        try {
-            // 读取配置文件内容
-            const { errno: readErrno, stdout, stderr: readStderr } = await exec('cat /storage/emulated/0/Android/清理规则/配置.txt');
-            if (readErrno !== 0) {
-                toast(`读取配置文件失败: ${readStderr}`);
-                return;
-            }
-
-            // 更新配置内容
-            const lines = stdout.split('\n');
-            const updatedLines = lines.map(line => {
-                if (line.startsWith('保留天数=')) {
-                    return `保留天数=${retentionDays}`;
-                } else if (line.startsWith('程序清理间隔秒数=')) {
-                    return `程序清理间隔秒数=${cleanInterval}`;
-                }
-                return line;
-            });
-
-            // 写入更新后的配置
-            const updatedConfig = updatedLines.join('\n');
-            const { errno: writeErrno, stderr: writeStderr } = await exec(`echo "${updatedConfig}" > /storage/emulated/0/Android/清理规则/配置.txt`);
-            if (writeErrno === 0) {
-                toast('配置保存成功');
-            } else {
-                toast(`错误: ${writeStderr}`);
-            }
-        } catch (error) {
-            toast(`保存配置失败: ${error.message}`);
+    async function saveConfigFile(retentionDays， cleanInterval) {
+    try {
+        const { errno， stdout， stderr } = await exec('cat /data/media/0/Android/清理规则/配置.txt');
+        if (errno !== 0) {
+            toast(`读取配置文件失败: ${stderr}`);
+            return;
         }
-    }
 
+        const lines = stdout。split('\n');
+        const updatedLines = lines。map(line => {
+            if (line。startsWith('保留天数=')) {
+                return `保留天数=${retentionDays}`;
+            } else if (line。startsWith('程序清理间隔秒数=')) {
+                return `程序清理间隔秒数=${cleanInterval}`;
+            }
+            return line;
+        });
+
+        // 确保配置项存在
+        const hasRetentionDays = updatedLines。some(line => line。startsWith('保留天数='));
+        const hasCleanInterval = updatedLines。some(line => line。startsWith('程序清理间隔秒数='));
+
+        if (!hasRetentionDays) {
+            updatedLines。push(`保留天数=${retentionDays}`);
+        }
+        if (!hasCleanInterval) {
+            updatedLines。push(`程序清理间隔秒数=${cleanInterval}`);
+        }
+
+        const updatedConfig = updatedLines。join('\n');
+        const { errno: writeErrno， stderr: writeStderr } = await exec(`echo "${updatedConfig}" > /data/media/0/Android/清理规则/配置.txt`);
+        
+        if (writeErrno === 0) {
+            toast('配置保存成功');
+        } else {
+            toast(`错误: ${writeStderr}`);
+        }
+    } catch (error) {
+        toast(`保存配置失败: ${error。message}`);
+    }
+}
     // 设置 f2fs垃圾回收 参数
-    async function setF2fsGc(value) {
-        try {
-            // 读取配置文件内容
-            const { errno: readErrno, stdout, stderr: readStderr } = await exec('cat /storage/emulated/0/Android/清理规则/配置.txt');
-            if (readErrno !== 0) {
-                toast(`读取配置文件失败: ${readStderr}`);
-                return;
-            }
+async function setF2fsGc(value) {
+    try {
+        // 根据文件系统类型确定配置项名称和显示名称
+        const configKey = 'f2fs-GC';
+        const displayName = isExt4 ? 'EXT4碎片整理' : 'f2fs垃圾回收';
 
-            // 更新配置内容
-            const lines = stdout.split('\n');
-            let f2fsGcFound = false;
-            const updatedLines = lines.map(line => {
-                if (line.startsWith('f2fs-GC=')) {
-                    f2fsGcFound = true;
-                    return `f2fs-GC=${value}`;
-                }
-                return line;
-            });
+        // 读取配置文件
+        const { errno， stdout， stderr } = await exec('cat /data/media/0/Android/清理规则/配置.txt');
+        if (errno !== 0) throw new 错误(`读取配置失败: ${stderr}`);
 
-            // 如果 f2fs-GC 参数不存在，则添加
-            if (!f2fsGcFound) {
-                updatedLines.push(`f2fs-GC=${value}`);
+        // 更新配置项
+        let lines = stdout。split('\n');
+        let found = false;
+        const updatedLines = lines。map(line => {
+            if (line。startsWith(configKey + '=')) {
+                found = true;
+                return `${configKey}=${value}`;
             }
+            return line;
+        });
 
-            // 写入更新后的配置
-            const updatedConfig = updatedLines.join('\n');
-            const { errno: writeErrno, stderr: writeStderr } = await exec(`echo "${updatedConfig}" > /storage/emulated/0/Android/清理规则/配置.txt`);
-            if (writeErrno === 0) {
-                toast(`f2fs垃圾回收 已设置为 ${value}`);
-            } else {
-                toast(`错误: ${writeStderr}`);
-            }
-        } catch (error) {
-            toast(`设置 f2fs垃圾回收 失败: ${error.message}`);
-        }
+        // 如果未找到则添加新配置项
+        if (!found) updatedLines。push(`${configKey}=${value}`);
+
+        // 写入更新后的配置
+        const { errno: writeErr， stderr: writeStderr } = await exec(
+            `echo "${updatedLines。join('\n')}" > /data/media/0/Android/清理规则/配置.txt`
+        );
+        
+        if (writeErr !== 0) throw new 错误(`写入配置失败: ${writeStderr}`);
+        toast(`${displayName}已${value === 'y' ? '启用' : '禁用'}`);
+    } catch (error) {
+        toast(`操作失败: ${error。message}`);
     }
+}
 
     // 编辑规则文件
     async function editRuleFile(fileName) {
         try {
-            const filePath = `/storage/emulated/0/Android/清理规则/${fileName}`;
-            const { errno, stderr } = await exec(`am start -a android.intent.action.VIEW -d "file://${filePath}" -t "text/plain"`);
+            const filePath = `/data/media/0/Android/清理规则/${fileName}`;
+            const { errno， stderr } = await exec(`am start -a android.intent.action.VIEW -d file://${filePath} -t text/plain`);
             if (errno !== 0) {
-                toast(`错误: ${stderr}`);
+                throw new 错误(`编辑文件失败: ${stderr}`);
             }
         } catch (error) {
-            toast(`编辑文件失败: ${error.message}`);
+            toast(`编辑文件失败: ${error。message}`);
         }
     }
 
     // 刷新日志
-    refreshLogBtn.addEventListener('click', async () => {
+    refreshLogBtn。addEventListener('click'， async () => {
         await loadLogFile();
-        toast('日志已刷新');
+        await updateSegmentInfo();
+        toast('数据已刷新');
     });
 
     // 删除日志
-    deleteLogBtn.addEventListener('click', async () => {
+    deleteLogBtn。addEventListener('click'， async () => {
         try {
-            const { errno, stderr } = await exec('echo "" > /data/adb/modules/Clean-C/log.txt');
+            const { errno， stderr } = await exec('echo "" > /data/adb/modules/Clean-C/run.log');
             if (errno === 0) {
                 await loadLogFile();
                 toast('日志已删除');
             } else {
-                toast(`错误: ${stderr}`);
+                throw new 错误(`删除日志失败: ${stderr}`);
             }
         } catch (error) {
-            toast(`删除日志失败: ${error.message}`);
+            toast(`删除日志失败: ${error。message}`);
         }
     });
 
     // 重启模块
-    restartModuleBtn.addEventListener('click', async () => {
+    restartModuleBtn。addEventListener('click'， async () => {
         try {
-            const { errno, stderr } = await exec('/data/adb/modules/Clean-C/kill.sh');
+            const { errno， stderr } = await exec('sh ./rest.sh'， {
+                cwd: '/data/adb/modules/Clean-C/'，
+            });
+
+            if (stderr) {
+                toast(`stderr: ${stderr}`);
+            }
+
             if (errno === 0) {
                 toast('模块已重启');
             } else {
-                toast(`错误: ${stderr}`);
+                toast(`重启模块失败: ${stderr || '未知错误'}`);
             }
         } catch (error) {
-            toast(`重启模块失败: ${error.message}`);
+            toast(`模块重启失败: ${error。message}`);
         }
     });
 
-    // 获取并更新脏段和空闲段信息
-    async function updateSegmentInfo() {
-        try {
-            const DATA_DEVICE = (await exec('getprop dev.mnt.dev.data')).stdout.trim();
-            const F2FS_SYSFS = `/sys/fs/f2fs/${DATA_DEVICE}`;
+    // 更新段信息
+async function updateSegmentInfo(fsType) {
 
-            const initial_dirty_segs = (await exec(`cat ${F2FS_SYSFS}/dirty_segments`)).stdout.trim();
-            const current_free_segs = (await exec(`cat ${F2FS_SYSFS}/free_segments`)).stdout.trim();
-
-            // 更新环形图数据和标签
-            segmentChart.data.labels = [
-                `脏段 (${initial_dirty_segs})`,
-                `空闲段 (${current_free_segs})`,
-            ];
-            segmentChart.data.datasets[0].data = [initial_dirty_segs, current_free_segs];
-            segmentChart.update();
-
-            // 获取 GC 状态
-            const gcUrgent = (await exec(`cat ${F2FS_SYSFS}/gc_urgent`)).stdout.trim();
-            if (gcUrgent.includes('GC_NORMAL')) {
-                gcStatusSpan.textContent = 'GC回收关闭';
-            } else if (gcUrgent.includes('GC_URGENT_HIGH')) {
-                gcStatusSpan.textContent = 'GC回收开启';
-            } else {
-                gcStatusSpan.textContent = '未知';
-            }
-        } catch (error) {
-            toast(`获取段信息失败: ${error.message}`);
+    try {
+        // 获取数据分区设备名
+        const { errno: getpropErrno， stdout: dataDevice， stderr: getpropStderr } = await exec('getprop dev.mnt.dev.data');
+        if (getpropErrno !== 0) {
+            throw new 错误(`获取 DATA_DEVICE 失败: ${getpropStderr}`);
         }
+
+        const dataDeviceTrimmed = dataDevice。trim();
+        // 默认使用 f2fs 路径
+        let F2FS_SYSFS = `/sys/fs/f2fs/${dataDeviceTrimmed}`;
+
+        // 检查是否为 MIFS 文件系统
+        // 确保 fsType 存在且不为 undefined 再调用 trim()
+        if (fsType && fsType。trim() === 'mifs') {
+            F2FS_SYSFS = `/sys/fs/mifs/${dataDeviceTrimmed}`;
+        }
+
+        // 获取脏段数量
+        const { errno: dirtySegmentsErrno， stdout: initialDirtySegs， stderr: dirtySegmentsStderr } = await exec(`cat ${F2FS_SYSFS}/dirty_segments`);
+        if (dirtySegmentsErrno !== 0) {
+            throw new 错误(`获取脏段数量失败: ${dirtySegmentsStderr}`);
+        }
+
+        // 获取空闲段数量
+        const { errno: freeSegmentsErrno， stdout: currentFreeSegs， stderr: freeSegmentsStderr } = await exec(`cat ${F2FS_SYSFS}/free_segments`);
+        if (freeSegmentsErrno !== 0) {
+            throw new 错误(`获取空闲段数量失败: ${freeSegmentsStderr}`);
+        }
+
+        // 更新图表数据
+        segmentChart。data。labels = [
+            `脏段 (${initialDirtySegs。trim()})`，
+            `空闲段 (${currentFreeSegs。trim()})`，
+        ];
+        segmentChart。data。datasets[0]。data = [initialDirtySegs。trim()， currentFreeSegs。trim()];
+        segmentChart。update();
+
+        // 获取 GC 状态
+        const { errno: gcUrgentErrno， stdout: gcUrgent， stderr: gcUrgentStderr } = await exec(`cat ${F2FS_SYSFS}/gc_urgent`);
+        if (gcUrgentErrno !== 0) {
+            throw new 错误(`获取 GC 状态失败: ${gcUrgentStderr}`);
+        }
+
+        // 更新 GC 状态显示
+        const value = String(gcUrgent)。trim();
+        gcStatusSpan。textContent = 
+            value === '0' || value。includes('GC_NORMAL') ? 'GC回收关闭' :
+            value === '1' || value。includes('GC_URGENT_HIGH') ? 'GC回收开启' :
+            '未知';
+
+    } catch (error) {
+        toast(`获取段信息失败: ${error。message}`);
     }
-
-    // 表单提交事件
-    configForm.addEventListener('submit', async (e) => {
-        e.preventDefault();
-        const retentionDays = retentionDaysInput.value;
-        const cleanInterval = cleanIntervalInput.value;
-        await saveConfigFile(retentionDays, cleanInterval);
-    });
+}
 
     // 绑定按钮事件
-    editBlacklist1Btn.addEventListener('click', () => editRuleFile('blacklist1.txt'));
-    editBlacklist2Btn.addEventListener('click', () => editRuleFile('blacklist2.txt'));
-    editWhitelistBtn.addEventListener('click', () => editRuleFile('whitelist.txt'));
+    editBlacklist1Btn。addEventListener('click'， () => editRuleFile('blacklist1.txt'));
+    editBlacklist2Btn。addEventListener('click'， () => editRuleFile('blacklist2.txt'));
+    editWhitelistBtn。addEventListener('click'， () => editRuleFile('whitelist.txt'));
 
     // 设置 f2fs垃圾回收 开关状态
-    f2fsGcToggle.addEventListener('change', async () => {
-        const value = f2fsGcToggle.checked ? 'y' : 'n';
+    f2fsGcToggle。addEventListener('change'， async () => {
+        const value = f2fsGcToggle。checked ? 'y' : 'n';
         await setF2fsGc(value);
 
-        // 更新按钮样式和文字
         if (value === 'y') {
-            f2fsGcToggleLabel.textContent = '已开启';
-            f2fsGcToggleLabel.classList.remove('btn-outline-secondary');
-            f2fsGcToggleLabel.classList.add('btn-success'); // 绿色
+            f2fsGcToggleLabel。textContent = '已开启';
+            f2fsGcToggleLabel。classList。remove('btn-outline-secondary');
+            f2fsGcToggleLabel。classList。add('btn-success');
         } else {
-            f2fsGcToggleLabel.textContent = '关闭';
-            f2fsGcToggleLabel.classList.remove('btn-success');
-            f2fsGcToggleLabel.classList.add('btn-outline-secondary'); // 灰色
+            f2fsGcToggleLabel。textContent = '关闭';
+            f2fsGcToggleLabel。classList。remove('btn-success');
+            f2fsGcToggleLabel。classList。add('btn-outline-secondary');
         }
     });
 
-    // 初始化
-    await loadLogFile();
-    await loadConfigFile();
-    await updateSegmentInfo(); // 初始化段信息
+    // 初始化流程
+const fsType = await checkFileSystem(); // 获取 fsType
+await initDatePicker();
+await loadLogFile();
+await loadConfigFile();
+if (fsType !== 'ext4') await updateSegmentInfo(fsType); // 传递 fsType
+updateBarChart();
 });
