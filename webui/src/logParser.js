@@ -22,7 +22,7 @@ export function parseLogContent(logContent) {
                 deletedFiles: 0,
                 deletedDirs: 0,
                 dirtySegments: 0,
-                trimmedMB: 0
+                
             };
         }
 
@@ -42,12 +42,13 @@ export function parseLogContent(logContent) {
             if (match) {
                 dataByTimestamp[timestamp].dirtySegments += parseInt(match[1], 10);
             }
-        } else if (line.includes('已裁剪') && line.includes('MB')) {
+        } // 移除 裁剪数据解析
+        /* else if (line.includes('已裁剪') && line.includes('MB')) {
             const match = line.match(/已裁剪\s*([\d.]+)\s*MB/);
        if (match) {
            dataByTimestamp[timestamp].trimmedMB += parseFloat(match[1]);
        }
-        }
+        } */
     });
 
     // 将按时间戳存储的数据转换为数组
@@ -68,7 +69,7 @@ export function updateLocalStorage(newData) {
             existingEntry.deletedFiles = newEntry.deletedFiles;
             existingEntry.deletedDirs = newEntry.deletedDirs;
             existingEntry.dirtySegments = newEntry.dirtySegments;
-            existingEntry.trimmedMB = newEntry.trimmedMB;
+            // 移除 existingEntry.trimmedMB = newEntry.trimmedMB;
         } else {
             // 否则添加新数据
             storedData.push(newEntry);
