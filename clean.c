@@ -540,18 +540,6 @@ int main(int argc, char *argv[]) {
     strncpy(program_name, argv[0], sizeof(program_name) - 1);
     program_name[sizeof(program_name) - 1] = '\0';
 
-    log_file = fopen("run.log", "a");
-    if (!log_file) {
-        perror("无法打开日志文件");
-        return EXIT_FAILURE;
-    }
-
-    time_t start_time = time(NULL);
-    char time_str[100];
-    strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", localtime(&start_time));
-    log_message(1, "\n程序启动时间: %s\n", time_str);
-
-
     static struct option long_options[] = {
         {"blacklist1", required_argument, 0, '1'},
         {"blacklist2", required_argument, 0, '2'},
@@ -583,114 +571,128 @@ int main(int argc, char *argv[]) {
             case 'D':
                 days = atoi(optarg);
                 if (days < 0) {
-                    log_message(1， "%s: 错误: 无效的天数 '%s', 必须为非负整数。\n", program_name, optarg);
-                    fclose(log_file);
+                    fprintf(stderr, "%s: 错误: 无效的天数 '%s', 必须为非负整数。\n", program_name, optarg);
                     return EXIT_FAILURE;
                 }
                 break;
             case 's':
                 seconds = atoi(optarg);
                 if (seconds < 0) {
-                    log_message(1， "%s: 错误: 无效的时间间隔 '%s', 必须为非负整数。\n", program_name, optarg);
-                    fclose(log_file);
+                    fprintf(stderr, "%s: 错误: 无效的时间间隔 '%s', 必须为非负整数。\n", program_name, optarg);
                     return EXIT_FAILURE;
                 }
                 break;
             case 'd':
                 debug_level = atoi(optarg);
                 if (debug_level < 0 || debug_level > 2) {
-                    log_message(1， "%s: 错误: 无效的调试级别 '%s', 必须为 0, 1 或 2。\n", program_name, optarg);
-                    fclose(log_file);
+                    fprintf(stderr, "%s: 错误: 无效的调试级别 '%s', 必须为 0, 1 或 2。\n", program_name, optarg);
                     return EXIT_FAILURE;
                 }
                 break;
             case 'h':
                 print_help(program_name);
-                fclose(log_file);
                 return EXIT_SUCCESS;
             case 'u': uid_str = optarg; break;
             case 'g': gid_str = optarg; break;
-            默认:
-                log_message(1， "%s: 错误: 未知选项或缺少选项参数 '-%c'。\n", program_name, optopt);
+            default:
+                fprintf(stderr, "%s: 错误: 未知选项或缺少选项参数 '-%c'。\n", program_name, optopt);
                 print_help(program_name);
-                fclose(log_file);
                 return EXIT_FAILURE;
         }
     }
 
-    log_message(2， "调试信息: argc = %d, optind = %d\n", argc, optind);
-    log_message(2， "调试信息: blacklist1_file = %s, blacklist2_file = %s, whitelist_file = %s, days = %d\n"，
+    // 获取并设置 UID 和 GID
+if (uid_str) {
+    struct passwd *pwd = getpwnam(uid_str);
+    if (pwd) {
+        target_uid = pwd->pw_uid;
+    } else {
+        char *endptr;
+        target_uid = strtol(uid_str, &endptr, 10);
+        if (*endptr != '\0' || (target_uid == 0 && errno == EINVAL)) {
+            fprintf(stderr, "%s: 错误: 无效的用户ID或用户名 '%s'\n", program_name, uid_str);
+            return EXIT_FAILURE;
+        }
+    }
+}
+
+// 获取目标GID
+if (gid_str) {
+    struct group *grp = getgrnam(gid_str);
+    if (grp) {
+        target_gid = grp->gr_gid;
+    } else {
+        char *endptr;
+        target_gid = strtol(gid_str, &endptr, 10);
+        if (*endptr != '\0' || (target_gid == 0 && errno == EINVAL)) {
+            fprintf(stderr, "%s: 错误: 无效的组ID或组名 '%s'\n", program_name, gid_str);
+            return EXIT_FAILURE;
+        }
+    }
+}
+
+// 设置日志文件
+log_file = fopen("run.log", "a");
+if (!log_file) {
+    perror("无法打开日志文件");
+    return EXIT_FAILURE;
+}
+
+if (target_gid != -1) {
+    if (setgid(target_gid) != 0) {
+        fprintf(stderr, "%s: setgid(%u) 失败: %s\n", program_name, 
+                (unsigned int)target_gid, strerror(errno));
+        fclose(log_file);
+        return EXIT_FAILURE;
+    }
+    log_message(2, "成功设置GID为: %u\n", (unsigned int)target_gid);
+}
+
+if (target_uid != -1) {
+    if (setuid(target_uid) != 0) {
+        fprintf(stderr, "%s: setuid(%u) 失败: %s\n", program_name, 
+                (unsigned int)target_uid, strerror(errno));
+        fclose(log_file);
+        return EXIT_FAILURE;
+    }
+    log_message(2, "成功设置UID为: %u\n", (unsigned int)target_uid);
+}
+
+    time_t start_time = time(NULL);
+    char time_str[100];
+    strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", localtime(&start_time));
+    log_message(1, "\n程序启动时间: %s\n", time_str);
+
+    log_message(2, "调试信息: argc = %d, optind = %d\n", argc, optind);
+    log_message(2, "调试信息: blacklist1_file = %s, blacklist2_file = %s, whitelist_file = %s, days = %d\n",
            blacklist1_file, blacklist2_file, whitelist_file, days);
-    log_message(2， "调试信息: seconds = %d, debug_level = %d, target_uid_str = %s, target_gid_str = %s\n"，
+    log_message(2, "调试信息: seconds = %d, debug_level = %d, target_uid_str = %s, target_gid_str = %s\n",
        seconds, debug_level, uid_str ? uid_str : "(未指定)", gid_str? gid_str : "(未指定)");
 
-
     if (!blacklist1_file || !whitelist_file) {
-        log_message(1， "%s: 错误: 必须指定 -1 <blacklist1> 和 -w <whitelist> 文件路径。\n", program_name);
+        log_message(1, "%s: 错误: 必须指定 -1 <blacklist1> 和 -w <whitelist> 文件路径。\n", program_name);
         print_help(program_name);
         fclose(log_file);
         return EXIT_FAILURE;
     }
     if (blacklist2_file && days <= 0) {
-        log_message(1， "%s: 错误: 当指定 -2 <blacklist2> 时，必须同时指定 -D <days> 且天数必须为正整数。\n", program_name);
+        log_message(1, "%s: 错误: 当指定 -2 <blacklist2> 时，必须同时指定 -D <days> 且天数必须为正整数。\n", program_name);
         print_help(program_name);
         fclose(log_file);
         return EXIT_FAILURE;
     }
 
-
-    if (uid_str) {
-        struct passwd *pwd = getpwnam(uid_str);
-        target_uid = pwd ? pwd->pw_uid : atoi(uid_str);
-        if (target_uid <= 0 && strcmp(uid_str, "0") != 0) {
-            log_message(1， "%s: 错误: 无效的用户ID或用户名 '%s'。\n", program_name, uid_str);
-            fclose(log_file);
-            return EXIT_FAILURE;
-        }
-        log_message(2， "调试信息: 目标 UID = %u\n"， (unsigned int)target_uid);
-    }
-
-    if (gid_str) {
-        struct group *grp = getgrnam(gid_str);
-        target_gid = grp ? grp->gr_gid : atoi(gid_str);
-        if (target_gid <= 0 && strcmp(gid_str, "0") != 0) {
-            log_message(1， "%s: 错误: 无效的组ID或组名 '%s'。\n", program_name, gid_str);
-            fclose(log_file);
-            return EXIT_FAILURE;
-        }
-        log_message(2， "调试信息: 目标 GID = %u\n"， (unsigned int)target_gid);
-    }
-
-
-    if (target_uid != -1 || target_gid != -1) {
-        if (target_gid != -1 && setgid(target_gid) != 0) {
-            fprintf(stderr, "%s: setgid(%u) 失败: %s\n", program_name, (unsigned int)target_gid, strerror(errno));
-            fclose(log_file);
-            return EXIT_FAILURE;
-        } else if (target_gid != -1) {
-             log_message(1， "%s: setgid(%u) 成功\n", program_name, (unsigned int)target_gid);
-        }
-        if (target_uid != -1 && setuid(target_uid) != 0) {
-            fprintf(stderr, "%s: setuid(%u) 失败: %s\n", program_name, (unsigned int)target_uid, strerror(errno));
-            fclose(log_file);
-            return EXIT_FAILURE;
-        } else if (target_uid != -1) {
-            log_message(1， "%s: setuid(%u) 成功\n", program_name, (unsigned int)target_uid);
-        }
-    }
-
-
     do {
         time_t loop_start_time = time(NULL);
-        strftime(time_str, sizeof(time_str)， "%Y-%m-%d %H:%M:%S"， localtime(&loop_start_time));
-        log_message(1， "\n循环开始时间: %s\n", time_str);
+        strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", localtime(&loop_start_time));
+        log_message(1, "\n循环开始时间: %s\n", time_str);
 
         char **blacklist1 = NULL, **blacklist2 = NULL, **whitelist = NULL;
         int bl1_count = read_file_to_array(blacklist1_file, &blacklist1);
         int bl2_count = blacklist2_file ? read_file_to_array(blacklist2_file, &blacklist2) : 0;
         int wl_count = read_file_to_array(whitelist_file, &whitelist);
 
-        process_blacklist(blacklist1, bl1_count, whitelist, wl_count, 0， 0);
+        process_blacklist(blacklist1, bl1_count, whitelist, wl_count, 0, 0);
         if (blacklist2_file) {
             process_blacklist(blacklist2, bl2_count, whitelist, wl_count, 1, days);
         }
@@ -700,17 +702,17 @@ int main(int argc, char *argv[]) {
         free_array(whitelist, wl_count);
 
         time_t end_time = time(NULL);
-        strftime(time_str, sizeof(time_str)， "%Y-%m-%d %H:%M:%S"， localtime(&end_time));
-        log_message(1， "%s 已删除文件数: %d\n", time_str, total_files_deleted);
-        log_message(1， "%s 已删除目录数: %d\n", time_str, total_dirs_deleted);
+        strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", localtime(&end_time));
+        log_message(1, "%s 已删除文件数: %d\n", time_str, total_files_deleted);
+        log_message(1, "%s 已删除目录数: %d\n", time_str, total_dirs_deleted);
 
         total_files_deleted = total_dirs_deleted = 0;
 
         if (seconds > 0) {
-            log_message(1， "等待 %d 秒后进行下一次循环...\n", seconds);
+            log_message(1, "等待 %d 秒后进行下一次循环...\n", seconds);
             sleep(seconds);
         } else {
-            log_message(1， "单次执行完成，程序退出。\n");
+            log_message(1, "单次执行完成，程序退出。\n");
         }
 
     } while (seconds > 0);
