@@ -1,4 +1,3 @@
-#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -6,265 +5,266 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
-#include <fnmatch.h>
 #include <getopt.h>
 #include <errno.h>
 #include <limits.h>
 #include <pwd.h>
 #include <grp.h>
+#include <regex.h>
+#include <fnmatch.h>
 #include <stdarg.h>
 
-/* 全局变量定义 */
-int debug_level = 1;        /* 调试级别: 0=无日志, 1=基本日志, 2=详细日志 */
-int total_files_deleted = 0; /* 已删除文件计数器 */
-int total_dirs_deleted = 0;  /* 已删除目录计数器 */
-FILE *log_file;             /* 日志文件句柄 */
-char program_name[PATH_MAX]; /* 程序名称 */
-uid_t target_uid = -1;       /* 目标用户ID */
-gid_t target_gid = -1;       /* 目标组ID */
+int debug_level = 1;
+int total_files_deleted = 0;
+int total_dirs_deleted = 0;
+FILE *log_file;
+char program_name[PATH_MAX];
+uid_t target_uid = -1;
+gid_t target_gid = -1;
 
-#define MAX_LOG_SIZE (256 * 1024) /* 最大日志文件大小: 256KB */
+#define MAX_LOG_SIZE (256 * 1024)
 
-/* 特殊规则结构体定义 */
+// 用于描述特殊规则的结构体，同时保存路径和转换后的正则表达式
 typedef struct {
-    char path[PATH_MAX];     /* 路径 */
-    char **patterns;         /* 匹配模式数组 */
-    int pattern_count;       /* 模式数量 */
+    char path[PATH_MAX];
+    regex_t regex;
+    int regex_valid;
 } SpecialRule;
 
-/**
- * 获取文件大小
- * @param filename: 文件名
- * @return: 文件大小，-1 表示出错
- */
+// 获取指定文件的大小，如果失败则返回 -1
 long long get_file_size(const char *filename) {
     struct stat statbuf;
-    if (stat(filename, &statbuf) == 0) {
-        return statbuf.st_size;
-    }
-    return -1;
+    return (stat(filename, &statbuf) == 0) ? statbuf.st_size : -1;
 }
 
-/**
- * 日志文件滚动
- */
+// 日志文件尺寸超过上限时进行滚动处理：重命名为 run.log.old 后重新创建 run.log
 void rotate_log_file() {
     fclose(log_file);
-    if (rename("run.log", "run.log.old") != 0) {
-        fprintf(stderr, "日志文件滚动失败: %s\n", strerror(errno));
-    } else if (debug_level >= 1) {
-        fprintf(stderr, "日志文件已滚动到 run.log.old\n");
+    if (rename("run.log", "run.log.old") == 0) {
+        if (debug_level >= 1)
+            fprintf(stderr, "日志文件已重命名为 run.log.old\n");
+    } else {
+        fprintf(stderr, "日志文件重命名失败: %s\n", strerror(errno));
     }
     log_file = fopen("run.log", "a");
     if (!log_file) {
         perror("无法打开新的日志文件");
         exit(EXIT_FAILURE);
     }
-    if (debug_level >= 1) {
-        fprintf(log_file, "新日志文件已打开，继续运行。\n");
-        fflush(log_file);
-    }
+    if (debug_level >= 1)
+        fprintf(log_file, "已打开新的日志文件，程序继续运行。\n");
 }
 
-/**
- * 检查并滚动日志文件
- */
+// 检查当前日志文件大小，如超过限额则执行日志滚动
 void check_and_rotate_log() {
-    if (get_file_size("run.log") > MAX_LOG_SIZE) {
+    if (get_file_size("run.log") > MAX_LOG_SIZE)
         rotate_log_file();
-    }
 }
 
-/**
- * 统一日志输出函数
- * @param level: 日志级别 (只有当全局 debug_level >= level 时才输出)
- * @param format: 格式化字符串，类似于 printf
- * @param ...: 可变参数
- */
+// 根据调试级别记录日志信息，支持 printf 格式化输出
 void log_message(int level, const char *format, ...) {
-    if (debug_level >= level) {
-        check_and_rotate_log();
-        va_list args;
-        va_start(args, format);
-        vfprintf(log_file, format, args);
-        va_end(args);
-        fflush(log_file);
-    }
+    if (debug_level < level)
+        return;
+    check_and_rotate_log();
+    va_list args;
+    va_start(args, format);
+    vfprintf(log_file, format, args);
+    va_end(args);
+    fflush(log_file);
 }
 
-
-/**
- * 统一删除操作函数
- * @param path: 要删除的项目路径
- * @param is_dir: 是否为目录(1=目录, 0=文件)
- */
+// 删除文件或目录项，并记录相关操作日志
 static void delete_item(const char *path, int is_dir) {
-    if (!path) return;
-
-    if (is_dir) {
-        if (rmdir(path) == 0) {
+    if (!path)
+        return;
+    int (*remove_func)(const char *) = is_dir ? rmdir : remove;
+    if (remove_func(path) == 0) {
+        if (is_dir) {
             total_dirs_deleted++;
-            log_message(2, "删除目录: %s\n", path);
+            log_message(2, "已删除目录: %s\n", path);
         } else {
-            log_message(1, "删除目录失败: %s, 错误: %s\n", path, strerror(errno));
+            total_files_deleted++;
+            struct stat statbuf;
+            int is_link = (lstat(path, &statbuf) == 0 && S_ISLNK(statbuf.st_mode));
+            log_message(2, "已删除%s: %s\n", is_link ? "符号链接" : "文件", path);
         }
     } else {
-        struct stat statbuf;
-        int is_link = (lstat(path, &statbuf) == 0 && S_ISLNK(statbuf.st_mode));
-        if (remove(path) == 0) {
-            total_files_deleted++;
-            log_message(2, "删除%s: %s\n", is_link ? "符号链接" : "文件", path);
-        } else {
-            log_message(1, "删除%s失败: %s, 错误: %s\n", is_link ? "符号链接" : "文件", path, strerror(errno));
-        }
+        log_message(1, "删除%s失败: %s, 错误: %s\n", 
+            is_dir ? "目录" : "文件/链接", path, strerror(errno));
     }
 }
 
-/**
- * 解析特殊规则函数
- * @param rule_str: 规则字符串
- * @param rule: 特殊规则结构体指针
- * @return: 1=成功, 0=失败
- */
+// 将通配符模式转换为正则表达式（支持 '*', '?', 等符号）
+char *wildcard_to_regex(const char *wildcard) {
+    if (!wildcard)
+        return NULL;
+    size_t len = strlen(wildcard);
+    char *regex_str = malloc(len * 3 + 3); // 分配足够空间以容纳转换后的表达式
+    if (!regex_str)
+        return NULL;
+    char *p = regex_str;
+    *p++ = '^'; // 从头开始匹配
+    for (size_t i = 0; i < len; i++) {
+        switch (wildcard[i]) {
+            case '*': *p++ = '.'; *p++ = '*'; break;
+            case '?': *p++ = '.'; break;
+            case '.': *p++ = '\\'; *p++ = '.'; break;
+            case '[': *p++ = '['; break;
+            case ']': *p++ = ']'; break;
+            case '|': *p++ = '|'; break;
+            case '{': *p++ = '('; break;
+            case '}': *p++ = ')'; break;
+            case ',': *p++ = '|'; break;
+            case '\\': *p++ = '\\'; *p++ = '\\'; break;
+            default: *p++ = wildcard[i];
+        }
+    }
+    *p++ = '$'; // 结束匹配
+    *p = '\0';
+    return regex_str;
+}
+
+// 解析特殊规则字符串，提取路径和规则模式，转换为正则表达式
 static int parse_special_rule(const char *rule_str, SpecialRule *rule) {
-    if (!rule_str || !rule) return 0;
-
-    char *pattern_start = strchr(rule_str, '[');
-    if (!pattern_start || !strchr(pattern_start, ']')) return 0;
-
-    size_t path_len = pattern_start - rule_str;
-    if (path_len >= PATH_MAX) return 0;
-
+    if (!rule_str || !rule)
+        return 0;
+    memset(rule, 0, sizeof(SpecialRule));
+    const char *p = rule_str;
+    const char *path_end = rule_str;
+    // 查找 '[' 作为规则模式的开始位置
+    while (*p) {
+        if (*p == '\\') {
+            p++;
+            if (*p) p++;
+        } else if (*p == '[') {
+            path_end = p;
+            break;
+        } else {
+            p++;
+        }
+    }
+    if (*p != '[')
+        return 0;
+    size_t path_len = path_end - rule_str;
+    if (path_len >= PATH_MAX)
+        return 0;
     strncpy(rule->path, rule_str, path_len);
     rule->path[path_len] = '\0';
-
-    char *pattern_end = strchr(pattern_start, ']');
-    if (!pattern_end) return 0;
-
-    size_t pattern_len = pattern_end - pattern_start - 1;
-    char *patterns_str = malloc(pattern_len + 1);
-    if (!patterns_str) {
-        log_message(1, "[错误] 内存分配失败: patterns_str\n");
+    p++;  // 跳过 '['
+    const char *regex_start = p;
+    const char *regex_end = NULL;
+    // 查找对应的 ']' 结束标记
+    while (*p) {
+        if (*p == '\\') { 
+            p++; 
+            if (*p) p++; 
+        }
+        else if (*p == ']') { 
+            regex_end = p; 
+            break; 
+        }
+        else { 
+            p++; 
+        }
+    }
+    if (!regex_end)
+        return 0;
+    size_t regex_len = regex_end - regex_start;
+    char *regex_pattern = malloc(regex_len + 1);
+    if (!regex_pattern) {
+        log_message(1, "内存分配失败: regex_pattern\n");
         return 0;
     }
-    strncpy(patterns_str, pattern_start + 1, pattern_len);
-    patterns_str[pattern_len] = '\0';
-
-    const int initial_capacity = 5;
-    rule->pattern_count = 0;
-    rule->patterns = malloc(sizeof(char*) * initial_capacity);
-    if (!rule->patterns) {
-        log_message(1, "[错误] 内存分配失败: rule->patterns\n");
-        free(patterns_str);
+    strncpy(regex_pattern, regex_start, regex_len);
+    regex_pattern[regex_len] = '\0';
+    char *final_regex = wildcard_to_regex(regex_pattern);
+    free(regex_pattern);
+    if (!final_regex) {
+        log_message(1, "通配符转换为正则表达式失败\n");
         return 0;
     }
-    int capacity = initial_capacity;
-
-    char *token = strtok(patterns_str, "|");
-    while (token) {
-        if (rule->pattern_count >= capacity) {
-            capacity *= 2;
-            char **new_patterns = realloc(rule->patterns, sizeof(char*) * capacity);
-            if (!new_patterns) {
-                log_message(1, "[错误] 内存重分配失败: new_patterns\n");
-                free(patterns_str);
-                for (int i = 0; i < rule->pattern_count; i++) free(rule->patterns[i]);
-                free(rule->patterns);
-                return 0;
-            }
-            rule->patterns = new_patterns;
-        }
-        rule->patterns[rule->pattern_count] = strdup(token);
-        if (!rule->patterns[rule->pattern_count]) {
-            log_message(1, "[错误] 内存分配失败: rule->patterns[%d]\n", rule->pattern_count);
-            free(patterns_str);
-            for (int i = 0; i < rule->pattern_count; i++) free(rule->patterns[i]);
-            free(rule->patterns);
-            return 0;
-        }
-        rule->pattern_count++;
-        token = strtok(NULL, "|");
+    if (regcomp(&rule->regex, final_regex, REG_EXTENDED | REG_NOSUB) != 0) {
+        log_message(1, "正则表达式编译失败: %s\n", final_regex);
+        free(final_regex);
+        return 0;
     }
-
-    free(patterns_str);
+    free(final_regex);
+    rule->regex_valid = 1;
     return 1;
 }
 
-/**
- * 文件名模式匹配检查
- * @param filename: 文件名
- * @param patterns: 模式数组
- * @param count: 模式数量
- * @return: 1=匹配, 0=不匹配
- */
-static int filename_matches(const char *filename, const char **patterns, int count) {
-    if (!filename) return 0;
-    if (count == 0) return 1;
-    if (!patterns) return 0;
-
-    for (int i = 0; i < count; i++) {
-        if (patterns[i] && fnmatch(patterns[i], filename, 0) == 0) return 1;
+// 释放特殊规则中分配的正则表达式资源
+void free_special_rule(SpecialRule *rule) {
+    if (rule && rule->regex_valid) {
+        regfree(&rule->regex);
+        rule->regex_valid = 0;
     }
-    return 0;
 }
 
-/**
- * 检查路径是否在白名单中
- * @param path: 要检查的路径
- * @param whitelist: 白名单数组
- * @param whitelist_count: 白名单条目数量
- * @return: 1=在白名单中, 0=不在白名单中
- */
+// 判断文件名是否满足正则表达式匹配
+static int filename_matches_regex(const char *filename, regex_t *regex) {
+    return (filename && regex && regexec(regex, filename, 0, NULL, 0) == 0);
+}
+
+/* 
+   改进后的白名单判断函数：
+   确保路径或者其子路径如果在白名单中，则受保护，不进行删除处理 
+*/
 int is_in_whitelist(const char *path, char **whitelist, int whitelist_count) {
-    if (!path || !whitelist || whitelist_count <= 0) return 0;
-
+    if (!path || !whitelist || whitelist_count <= 0)
+        return 0;
+    // 直接比较白名单中是否存在完整匹配
     for (int i = 0; i < whitelist_count; i++) {
-        if (!whitelist[i]) continue;
-        if (fnmatch(whitelist[i], path, FNM_PATHNAME) == 0) return 1;
+        if (whitelist[i] && fnmatch(whitelist[i], path, FNM_PATHNAME) == 0)
+            return 1;
+    }
+    // 检查当前路径是否为白名单指定目录的子目录
+    size_t path_len = strlen(path);
+    char path_with_slash[PATH_MAX];
+    snprintf(path_with_slash, sizeof(path_with_slash), "%s/", path);
+    for (int i = 0; i < whitelist_count; i++) {
+        if (whitelist[i] && strncmp(whitelist[i], path_with_slash, strlen(path_with_slash)) == 0)
+            return 1;
     }
     return 0;
 }
 
-
-/**
- * 从文件读取内容到数组
- * @param filename: 文件名
- * @param array: 指向字符串数组指针的指针
- * @return: 读取的行数
- */
+/* 
+   将配置文件内容按行读取，忽略空行和以 '#' 开头的注释行，
+   每行代表一条规则并存入数组中 
+*/
 int read_file_to_array(const char *filename, char ***array) {
-    if (!filename || !array) return 0;
-
+    if (!filename || !array)
+        return 0;
     FILE *file = fopen(filename, "r");
     if (!file) {
         log_message(1, "无法打开文件: %s, 错误: %s\n", filename, strerror(errno));
         return 0;
     }
-
     char *line = NULL;
     size_t line_len = 0;
     ssize_t read;
-    int count = 0;
-    int capacity = 10;
+    int count = 0, capacity = 10;
     char **temp_array = malloc(sizeof(char*) * capacity);
     if (!temp_array) {
-        log_message(1, "[错误] 内存分配失败: temp_array\n");
+        log_message(1, "内存分配失败: temp_array\n");
         fclose(file);
         return 0;
     }
-
     while ((read = getline(&line, &line_len, file)) != -1) {
-        if (read > 0 && line[read-1] == '\n') line[read-1] = '\0';
-        if (line[0] == '#' || line[0] == '\0') continue;
-
+        if (read > 0 && line[read - 1] == '\n')
+            line[read - 1] = '\0';
+        if (line[0] == '#' || line[0] == '\0')
+            continue;
         if (count >= capacity) {
             capacity *= 2;
             char **new_array = realloc(temp_array, sizeof(char*) * capacity);
             if (!new_array) {
-                log_message(1, "[错误] 内存重分配失败: new_array\n");
-                for (int j = 0; j < count; j++) free(temp_array[j]);
-                free(temp_array);
-                free(line);
+                log_message(1, "内存重分配失败: new_array\n");
+                for (int j = 0; j < count; j++)
+                    free(temp_array[j]);
+                free(temp_array); 
+                free(line); 
                 fclose(file);
                 return 0;
             }
@@ -272,8 +272,9 @@ int read_file_to_array(const char *filename, char ***array) {
         }
         temp_array[count] = strdup(line);
         if (!temp_array[count]) {
-            log_message(1, "[错误] 内存分配失败: temp_array[%d]\n", count);
-            for (int j = 0; j < count; j++) free(temp_array[j]);
+            log_message(1, "内存分配失败: temp_array[%d]\n", count);
+            for (int j = 0; j < count; j++)
+                free(temp_array[j]);
             free(temp_array);
             free(line);
             fclose(file);
@@ -281,28 +282,22 @@ int read_file_to_array(const char *filename, char ***array) {
         }
         count++;
     }
-
     free(line);
     fclose(file);
     *array = temp_array;
-    log_message(2, "从文件 %s 读取了 %d 行规则\n", filename, count);
+    log_message(2, "成功从 %s 中读取 %d 条规则\n", filename, count);
     return count;
 }
 
-/**
- * 检查文件是否过期
- * @param path: 文件路径
- * @param days: 过期天数
- * @return: 1=已过期, 0=未过期
- */
+// 检查某文件或目录自上次修改后的时间间隔是否超过指定天数
 int is_expired(const char *path, int days) {
-    if (!path || days < 0) return 0;
-
+    if (!path || days < 0)
+        return 0;
     struct stat statbuf;
     if (lstat(path, &statbuf) == 0) {
         time_t current_time = time(NULL);
         if (current_time == (time_t)-1) {
-            log_message(1, "[警告] 获取当前时间失败\n");
+            log_message(1, "警告：获取当前时间失败\n");
             return 0;
         }
         double diff_time = difftime(current_time, statbuf.st_mtime);
@@ -311,67 +306,57 @@ int is_expired(const char *path, int days) {
     return 0;
 }
 
-/**
- * 递归删除目录内容
- * @param path: 目录路径
- * @param whitelist: 白名单数组
- * @param wl_count: 白名单条目数量
- * @param patterns: 匹配模式数组
- * @param p_count: 模式数量
- * @param check_expiry: 是否检查过期
- * @param days: 过期天数
- * @param  skip_root: 是否跳过根目录
- */
-void delete_directory_recursive(const char *path, char **whitelist, int wl_count,
-    const char **patterns, int p_count, int check_expiry, int days, int skip_root) {
-    if (!path) return;
+/* 
+   函数声明：递归处理指定基路径下的所有条目，
+   同时依据白名单、过期时间等规则进行删除操作 
+*/
+void process_recursive(const char *base_path, char **whitelist, int wl_count, int check_expiry, int days);
 
+// 递归删除目录及其内容：适用于删除符合条件的目录或文件
+void delete_directory_recursive(const char *path, char **whitelist, int wl_count,
+    regex_t *regex, int check_expiry, int days, int skip_root) {
+    if (!path)
+        return;
     if (!skip_root && is_in_whitelist(path, whitelist, wl_count)) {
         log_message(2, "目录在白名单中，跳过: %s\n", path);
         return;
     }
-
     DIR *dir = opendir(path);
     if (!dir) {
         log_message(1, "无法打开目录: %s, 错误: %s\n", path, strerror(errno));
         return;
     }
-
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
-
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+            continue;
         char full_path[PATH_MAX];
         if (snprintf(full_path, sizeof(full_path), "%s/%s", path, entry->d_name) >= PATH_MAX) {
             log_message(1, "路径过长: %s/%s\n", path, entry->d_name);
             continue;
         }
-
         if (is_in_whitelist(full_path, whitelist, wl_count)) {
-            log_message(2, "项在白名单中，跳过: %s\n", full_path);
+            log_message(2, "项目在白名单中，跳过: %s\n", full_path);
             continue;
         }
-
         struct stat statbuf;
         if (lstat(full_path, &statbuf) != 0) {
             log_message(1, "无法获取文件信息: %s, 错误: %s\n", full_path, strerror(errno));
             continue;
         }
-
         if (S_ISDIR(statbuf.st_mode)) {
-            delete_directory_recursive(full_path, whitelist, wl_count,
-                                        patterns, p_count, check_expiry, days, 0);
+            delete_directory_recursive(full_path, whitelist, wl_count, regex, check_expiry, days, 0);
         } else {
             const char *filename = strrchr(full_path, '/');
             filename = filename ? filename + 1 : full_path;
-            if (filename_matches(filename, patterns, p_count) && (!check_expiry || is_expired(full_path, days))) {
+            if ((!regex || filename_matches_regex(filename, regex)) &&
+                (!check_expiry || is_expired(full_path, days))) {
                 delete_item(full_path, 0);
             }
         }
     }
     closedir(dir);
-
-    if (!skip_root) {
+    if (!skip_root && !is_in_whitelist(path, whitelist, wl_count)) {
         dir = opendir(path);
         if (dir) {
             int is_empty = 1;
@@ -382,160 +367,199 @@ void delete_directory_recursive(const char *path, char **whitelist, int wl_count
                 }
             }
             closedir(dir);
-            if (is_empty) {
+            if (is_empty)
                 delete_item(path, 1);
-            }
         }
     }
 }
 
-/**
- * 处理黑名单
- * @param blacklist: 黑名单数组
- * @param count: 黑名单条目数量
- * @param whitelist: 白名单数组
- * @param wl_count: 白名单条目数量
- * @param check_expiry: 是否检查过期
- * @param days: 过期天数
- */
-static void process_blacklist(char **blacklist, int count, char **whitelist, int wl_count, int check_expiry, int days) {
-    if (!blacklist || count <= 0) return;
-
-    SpecialRule rule;
+// 根据黑名单规则（支持通配符与递归）处理目标文件和目录的删除
+static void process_blacklist(char **blacklist, int count, char **whitelist, int wl_count,
+    int check_expiry, int days) {
+    if (!blacklist || count <= 0)
+        return;
     for (int i = 0; i < count; i++) {
-        if (!blacklist[i]) continue;
-
-        memset(&rule, 0, sizeof(rule));
-        const char *target_path = blacklist[i];
-        const char **patterns = NULL;
-        int p_count = 0;
-
-        if (strchr(blacklist[i], '[') && parse_special_rule(blacklist[i], &rule)) {
-            target_path = rule.path;
-            patterns = (const char **)rule.patterns;
-            p_count = rule.pattern_count;
+        if (!blacklist[i])
+            continue;
+        char *target_path = strdup(blacklist[i]);
+        if (!target_path) {
+            log_message(1, "内存分配失败\n");
+            continue;
         }
-
-        if (!is_in_whitelist(target_path, whitelist, wl_count)) {
-            struct stat statbuf;
-            if (lstat(target_path, &statbuf) != 0) {
-                log_message(2, "路径不存在，跳过: %s\n", target_path);
-                goto cleanup;
-            }
-
-            if (S_ISDIR(statbuf.st_mode)) {
-                if (patterns && p_count > 0 && strchr(blacklist[i], '[')) {
-                    DIR *dir_to_process = opendir(target_path);
-                    if (dir_to_process) {
-                        struct dirent *dir_entry;
-                        while ((dir_entry = readdir(dir_to_process)) != NULL) {
-                            if (strcmp(dir_entry->d_name, ".") == 0 || strcmp(dir_entry->d_name, "..") == 0) continue;
-                            char item_path[PATH_MAX];
-                            snprintf(item_path, sizeof(item_path), "%s/%s", target_path, dir_entry->d_name);
-
-                            struct stat item_statbuf;
-                            if (lstat(item_path, &item_statbuf) == 0) {
-                                if (!S_ISDIR(item_statbuf.st_mode)) {
-                                    const char *filename = dir_entry->d_name;
-                                    if ((!check_expiry || is_expired(item_path, days)) && filename_matches(filename, patterns, p_count)) {
-                                        delete_item(item_path, 0);
-                                    }
-                                }
-                            } else {
-                                log_message(1, "无法获取文件信息: %s, 错误: %s\n", item_path, strerror(errno));
-                            }
-                        }
-                        closedir(dir_to_process);
-
-                        dir_to_process = opendir(target_path);
-                        if (dir_to_process) {
-                            int is_empty_after_delete = 1;
-                            struct dirent *check_entry;
-                            while ((check_entry = readdir(dir_to_process)) != NULL) {
-                                if (strcmp(check_entry->d_name, ".") != 0 && strcmp(check_entry->d_name, "..") != 0) {
-                                    is_empty_after_delete = 0;
-                                    break;
-                                }
-                            }
-                            closedir(dir_to_process);
-                            if (is_empty_after_delete) {
-                                log_message(2, "删除空目录 (规则带通配符): %s\n", target_path);
-                                delete_item(target_path, 1);
-                            } else {
-                                log_message(2, "保留目录 (规则带通配符，非空): %s\n", target_path);
-                            }
-                        }
-                    } else {
-                        log_message(1, "无法打开目录进行处理 (通配符规则): %s, 错误: %s\n", target_path, strerror(errno));
-                    }
+        // 去除路径末尾的斜杠
+        size_t len = strlen(target_path);
+        while (len > 0 && target_path[len-1] == '/') {
+            target_path[len-1] = '\0';
+            len--;
+        }
+        // 若目标路径本身在白名单中，则跳过
+        if (is_in_whitelist(target_path, whitelist, wl_count)) {
+            log_message(2, "跳过白名单项: %s\n", target_path);
+            free(target_path);
+            continue;
+        }
+        // 检查是否包含通配符
+        if (strpbrk(target_path, "*?[") != NULL) {
+            char base_path[PATH_MAX] = {0};
+            char pattern_buffer[PATH_MAX] = {0};
+            char *pattern = NULL;
+            int is_recursive = 0;
+            // 检查是否包含 "**" 用于递归匹配
+            char *double_star = strstr(target_path, "**");
+            if (double_star) {
+                is_recursive = 1;
+                size_t base_len = double_star - target_path;
+                while (base_len > 0 && target_path[base_len-1] == '/')
+                    base_len--;
+                if (base_len == 0)
+                    strcpy(base_path, ".");
+                else {
+                    strncpy(base_path, target_path, base_len);
+                    base_path[base_len] = '\0';
+                }
+                char *after_stars = double_star + 2;
+                while (*after_stars == '/')
+                    after_stars++;
+                if (*after_stars) {
+                    strncpy(pattern_buffer, after_stars, sizeof(pattern_buffer)-1);
+                    pattern = pattern_buffer;
                 } else {
-                    delete_directory_recursive(target_path, whitelist, wl_count,
-                                            patterns, p_count, check_expiry, days, 1);
-                    log_message(2, "删除空目录 (规则不带通配符): %s\n", target_path);
-                    delete_item(target_path, 1);
+                    pattern = NULL;
+                }
+                // 遍历 base_path 下的所有目录及文件
+                DIR *dir = opendir(base_path);
+                if (dir) {
+                    struct dirent *entry;
+                    while ((entry = readdir(dir)) != NULL) {
+                        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, ".."))
+                            continue;
+                        char full_path[PATH_MAX];
+                        snprintf(full_path, sizeof(full_path), "%s/%s", base_path, entry->d_name);
+                        struct stat st;
+                        if (lstat(full_path, &st) == 0) {
+                            if (S_ISDIR(st.st_mode)) {
+                                if (!is_in_whitelist(full_path, whitelist, wl_count)) {
+                                    process_recursive(full_path, whitelist, wl_count, check_expiry, days);
+                                    // 若未设置匹配模式或名称符合模式，则删除目录
+                                    if (pattern == NULL || fnmatch(pattern, entry->d_name, FNM_PATHNAME) == 0)
+                                        delete_directory_recursive(full_path, whitelist, wl_count, NULL, check_expiry, days, 0);
+                                }
+                            } else {
+                                if (pattern == NULL || fnmatch(pattern, entry->d_name, FNM_PATHNAME) == 0) {
+                                    if (!is_in_whitelist(full_path, whitelist, wl_count) &&
+                                        (!check_expiry || is_expired(full_path, days)))
+                                        delete_item(full_path, 0);
+                                }
+                            }
+                        }
+                    }
+                    closedir(dir);
                 }
             } else {
-                const char *filename = strrchr(target_path, '/');
-                filename = filename ? filename + 1 : target_path;
-                if ((!check_expiry || is_expired(target_path, days)) && filename_matches(filename, patterns, p_count)) {
-                    delete_item(target_path, 0);
+                // 处理不使用递归匹配的通配符模式
+                char *last_slash = strrchr(target_path, '/');
+                if (last_slash) {
+                    *last_slash = '\0';
+                    pattern = last_slash + 1;
+                    strncpy(base_path, target_path, sizeof(base_path)-1);
+                } else {
+                    strcpy(base_path, ".");
+                    pattern = target_path;
+                }
+                DIR *dir = opendir(base_path);
+                if (dir) {
+                    struct dirent *entry;
+                    while ((entry = readdir(dir)) != NULL) {
+                        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, ".."))
+                            continue;
+                        char full_path[PATH_MAX];
+                        snprintf(full_path, sizeof(full_path), "%s/%s", base_path, entry->d_name);
+                        if (fnmatch(pattern, entry->d_name, FNM_PATHNAME) == 0) {
+                            if (!is_in_whitelist(full_path, whitelist, wl_count)) {
+                                struct stat st;
+                                if (lstat(full_path, &st) == 0) {
+                                    if (S_ISDIR(st.st_mode))
+                                        delete_directory_recursive(full_path, whitelist, wl_count, NULL, check_expiry, days, 0);
+                                    else if (!check_expiry || is_expired(full_path, days))
+                                        delete_item(full_path, 0);
+                                }
+                            }
+                        }
+                    }
+                    closedir(dir);
                 }
             }
         } else {
-            log_message(2, "黑名单路径在白名单中，跳过: %s\n", target_path);
+            // 处理不包含通配符的目标路径
+            struct stat st;
+            if (lstat(target_path, &st) == 0) {
+                if (S_ISDIR(st.st_mode))
+                    delete_directory_recursive(target_path, whitelist, wl_count, NULL, check_expiry, days, 0);
+                else if (!check_expiry || is_expired(target_path, days))
+                    delete_item(target_path, 0);
+            }
         }
-
-    cleanup:
-        for (int j = 0; j < rule.pattern_count; j++) free(rule.patterns[j]);
-        free(rule.patterns);
+        free(target_path);
     }
 }
 
+// 递归处理给定基目录下所有文件与目录，根据白名单和过期规则决定是否删除
+void process_recursive(const char *base_path, char **whitelist, int wl_count, int check_expiry, int days) {
+    DIR *dir = opendir(base_path);
+    if (!dir)
+        return;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, ".."))
+            continue;
+        char full_path[PATH_MAX];
+        snprintf(full_path, sizeof(full_path), "%s/%s", base_path, entry->d_name);
+        if (!is_in_whitelist(full_path, whitelist, wl_count)) {
+            struct stat st;
+            if (lstat(full_path, &st) == 0) {
+                if (S_ISDIR(st.st_mode)) {
+                    process_recursive(full_path, whitelist, wl_count, check_expiry, days);
+                    delete_directory_recursive(full_path, whitelist, wl_count, NULL, check_expiry, days, 0);
+                } else if (!check_expiry || is_expired(full_path, days))
+                    delete_item(full_path, 0);
+            }
+        }
+    }
+    closedir(dir);
+}
 
-/**
- * 释放字符串数组
- * @param array: 要释放的数组
- * @param count: 数组元素数量
- */
+// 释放保存规则的字符串数组
 void free_array(char **array, int count) {
-    if (!array) return;
-    for (int i = 0; i < count; i++) free(array[i]);
+    if (!array)
+        return;
+    for (int i = 0; i < count; i++)
+        free(array[i]);
     free(array);
 }
 
-/**
- * 打印帮助信息
- */
+// 打印程序使用说明和命令行选项
 void print_help(const char *program_name) {
     printf("用法:\n");
     printf("  %s [选项]\n", program_name);
     printf("\n选项:\n");
-    printf("  -1 <blacklist1>, --blacklist1=<blacklist1>  不检查过期时间的黑名单文件路径。\n");
-    printf("  -2 <blacklist2>, --blacklist2=<blacklist2>  检查过期时间的黑名单文件路径。\n");
-    printf("  -w <whitelist>, --whitelist=<whitelist>    白名单文件路径，每行一条路径规则。\n");
-    printf("  -D <days>, --days=<days>             文件过期天数 (与 -2 选项一起使用，必须为非负整数)。\n");
-    printf("  -s <seconds>, --seconds=<seconds>  设置程序循环执行的时间间隔，单位为秒 (必须为非负整数，0 表示单次执行)。\n");
-    printf("  -d <debug_level>, --debug=<debug_level>  设置调试级别 (0=无日志, 1=基本日志, 2=详细日志)。\n");
-    printf("  -u <uid>, --uid=<uid>  以指定用户ID运行 (可以是用户名或数字UID)。\n");
-    printf("  -g <gid>, --gid=<gid>  以指定组ID运行 (可以是组名或数字GID)。\n");
-    printf("  -h, --help       显示帮助信息。\n");
+    printf("  -1 <blacklist1>, --blacklist1=<blacklist1>  指定不检查过期时间的黑名单文件路径。\n");
+    printf("  -2 <blacklist2>, --blacklist2=<blacklist2>  指定需要检查过期时间的黑名单文件路径。\n");
+    printf("  -w <whitelist>, --whitelist=<whitelist>      指定白名单文件路径，每行一条规则。\n");
+    printf("  -D <days>, --days=<days>                     设置文件过期天数（适用于 -2 选项，必须为非负整数）。\n");
+    printf("  -s <seconds>, --seconds=<seconds>            设置循环执行的间隔时间（秒，0表示仅执行一次）。\n");
+    printf("  -d <debug_level>, --debug=<debug_level>      设置调试级别 (0=无日志, 1=基础日志, 2=详细日志)。\n");
+    printf("  -u <uid>, --uid=<uid>                        指定以特定用户ID或用户名运行。\n");
+    printf("  -g <gid>, --gid=<gid>                        指定以特定组ID或组名运行。\n");
+    printf("  -h, --help                                  显示帮助信息。\n");
     printf("\n注意:\n");
-    printf("  - 黑名单和白名单文件每行一条规则，# 开头的行和空行会被忽略。\n");
-    printf("  - 规则可以使用通配符，具体参考 fnmatch 函数。\n");
-    printf("  - 黑名单特殊规则格式: <路径>[<模式1>|<模式2>|...], 例如: /tmp/cache/[*.tmp|*.log]\n");
-    printf("  - 白名单仅支持简单的路径规则，不支持模式匹配。\n");
+    printf("  - 黑名单和白名单文件中每行代表一条规则，支持注释（以 '#' 开头）以及空行。\n");
+    printf("  - 黑名单规则支持通配符，并可用方括号指定模式，如: /tmp/cache/[*.tmp|*.log]\n");
+    printf("  - 白名单规则应为完整路径，匹配该路径及其所有子目录/文件。\n");
     printf("\n示例:\n");
     printf("  %s -1 blacklist1.txt -w whitelist.txt -s 60 -d 1\n", program_name);
     printf("  %s -1 blacklist1.txt -2 blacklist2.txt -w whitelist.txt -D 30\n", program_name);
 }
 
-
-/**
- * 主函数
- * @param argc: 命令行参数数量
- * @param argv: 命令行参数数组
- * @return: 执行状态码
- */
 int main(int argc, char *argv[]) {
     strncpy(program_name, argv[0], sizeof(program_name) - 1);
     program_name[sizeof(program_name) - 1] = '\0';
@@ -553,139 +577,131 @@ int main(int argc, char *argv[]) {
         {0, 0, 0, 0}
     };
 
-    int opt;
-    int seconds = 0;
-    char *uid_str = NULL;
-    char *gid_str = NULL;
-    char *blacklist1_file = NULL;
-    char *blacklist2_file = NULL;
-    char *whitelist_file = NULL;
-    int days = 0;
-
+    int opt, seconds = 0, days = 0;
+    char *uid_str = NULL, *gid_str = NULL, *blacklist1_file = NULL, *blacklist2_file = NULL, *whitelist_file = NULL;
+    char time_str[100];
 
     while ((opt = getopt_long(argc, argv, "1:2:w:D:s:d:hu:g:", long_options, NULL)) != -1) {
         switch (opt) {
-            case '1': blacklist1_file = optarg; break;
-            case '2': blacklist2_file = optarg; break;
-            case 'w': whitelist_file = optarg; break;
+            case '1': 
+                blacklist1_file = optarg; 
+                break;
+            case '2': 
+                blacklist2_file = optarg; 
+                break;
+            case 'w': 
+                whitelist_file = optarg; 
+                break;
             case 'D':
                 days = atoi(optarg);
                 if (days < 0) {
-                    fprintf(stderr, "%s: 错误: 无效的天数 '%s', 必须为非负整数。\n", program_name, optarg);
+                    fprintf(stderr, "%s: 错误: 无效的天数 '%s'\n", program_name, optarg);
                     return EXIT_FAILURE;
                 }
                 break;
             case 's':
                 seconds = atoi(optarg);
                 if (seconds < 0) {
-                    fprintf(stderr, "%s: 错误: 无效的时间间隔 '%s', 必须为非负整数。\n", program_name, optarg);
+                    fprintf(stderr, "%s: 错误: 无效的时间间隔 '%s'\n", program_name, optarg);
                     return EXIT_FAILURE;
                 }
                 break;
             case 'd':
                 debug_level = atoi(optarg);
                 if (debug_level < 0 || debug_level > 2) {
-                    fprintf(stderr, "%s: 错误: 无效的调试级别 '%s', 必须为 0, 1 或 2。\n", program_name, optarg);
+                    fprintf(stderr, "%s: 错误: 无效的调试级别 '%s'\n", program_name, optarg);
                     return EXIT_FAILURE;
                 }
                 break;
             case 'h':
                 print_help(program_name);
                 return EXIT_SUCCESS;
-            case 'u': uid_str = optarg; break;
-            case 'g': gid_str = optarg; break;
+            case 'u':
+                uid_str = optarg;
+                break;
+            case 'g':
+                gid_str = optarg;
+                break;
             default:
-                fprintf(stderr, "%s: 错误: 未知选项或缺少选项参数 '-%c'。\n", program_name, optopt);
+                fprintf(stderr, "%s: 错误: 未知选项 '-%c'\n", program_name, optopt);
                 print_help(program_name);
                 return EXIT_FAILURE;
         }
     }
 
-    // 获取并设置 UID 和 GID
-if (uid_str) {
-    struct passwd *pwd = getpwnam(uid_str);
-    if (pwd) {
-        target_uid = pwd->pw_uid;
-    } else {
-        char *endptr;
-        target_uid = strtol(uid_str, &endptr, 10);
-        if (*endptr != '\0' || (target_uid == 0 && errno == EINVAL)) {
-            fprintf(stderr, "%s: 错误: 无效的用户ID或用户名 '%s'\n", program_name, uid_str);
-            return EXIT_FAILURE;
+    if (uid_str) {
+        struct passwd *pwd = getpwnam(uid_str);
+        if (pwd)
+            target_uid = pwd->pw_uid;
+        else {
+            char *endptr;
+            target_uid = strtol(uid_str, &endptr, 10);
+            if (*endptr != '\0' || (target_uid == 0 && errno == EINVAL)) {
+                fprintf(stderr, "%s: 错误: 无效的用户ID或用户名 '%s'\n", program_name, uid_str);
+                return EXIT_FAILURE;
+            }
         }
     }
-}
-
-// 获取目标GID
-if (gid_str) {
-    struct group *grp = getgrnam(gid_str);
-    if (grp) {
-        target_gid = grp->gr_gid;
-    } else {
-        char *endptr;
-        target_gid = strtol(gid_str, &endptr, 10);
-        if (*endptr != '\0' || (target_gid == 0 && errno == EINVAL)) {
-            fprintf(stderr, "%s: 错误: 无效的组ID或组名 '%s'\n", program_name, gid_str);
-            return EXIT_FAILURE;
+    if (gid_str) {
+        struct group *grp = getgrnam(gid_str);
+        if (grp)
+            target_gid = grp->gr_gid;
+        else {
+            char *endptr;
+            target_gid = strtol(gid_str, &endptr, 10);
+            if (*endptr != '\0' || (target_gid == 0 && errno == EINVAL)) {
+                fprintf(stderr, "%s: 错误: 无效的组ID或组名 '%s'\n", program_name, gid_str);
+                return EXIT_FAILURE;
+            }
         }
     }
-}
 
-// 设置日志文件
-log_file = fopen("run.log", "a");
-if (!log_file) {
-    perror("无法打开日志文件");
-    return EXIT_FAILURE;
-}
+    log_file = fopen("run.log", "a");
+    if (!log_file) {
+        perror("无法打开日志文件");
+        return EXIT_FAILURE;
+    }
 
-if (target_gid != -1) {
-    if (setgid(target_gid) != 0) {
-        fprintf(stderr, "%s: setgid(%u) 失败: %s\n", program_name, 
+    if (target_gid != -1 && setgid(target_gid) != 0) {
+        fprintf(stderr, "%s: 设置 GID (%u) 失败: %s\n", program_name,
                 (unsigned int)target_gid, strerror(errno));
         fclose(log_file);
         return EXIT_FAILURE;
     }
-    log_message(2, "成功设置GID为: %u\n", (unsigned int)target_gid);
-}
+    log_message(2, "已设置 GID: %u\n", (unsigned int)target_gid);
 
-if (target_uid != -1) {
-    if (setuid(target_uid) != 0) {
-        fprintf(stderr, "%s: setuid(%u) 失败: %s\n", program_name, 
+    if (target_uid != -1 && setuid(target_uid) != 0) {
+        fprintf(stderr, "%s: 设置 UID (%u) 失败: %s\n", program_name,
                 (unsigned int)target_uid, strerror(errno));
         fclose(log_file);
         return EXIT_FAILURE;
     }
-    log_message(2, "成功设置UID为: %u\n", (unsigned int)target_uid);
-}
+    log_message(2, "已设置 UID: %u\n", (unsigned int)target_uid);
 
     time_t start_time = time(NULL);
-    char time_str[100];
     strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", localtime(&start_time));
     log_message(1, "\n程序启动时间: %s\n", time_str);
 
-    log_message(2, "调试信息: argc = %d, optind = %d\n", argc, optind);
-    log_message(2, "调试信息: blacklist1_file = %s, blacklist2_file = %s, whitelist_file = %s, days = %d\n",
-           blacklist1_file, blacklist2_file, whitelist_file, days);
-    log_message(2, "调试信息: seconds = %d, debug_level = %d, target_uid_str = %s, target_gid_str = %s\n",
-       seconds, debug_level, uid_str ? uid_str : "(未指定)", gid_str? gid_str : "(未指定)");
+    log_message(2, "参数信息: blacklist1=%s, blacklist2=%s, whitelist=%s, days=%d, seconds=%d, debug=%d\n",
+                blacklist1_file, blacklist2_file, whitelist_file, days, seconds, debug_level);
 
     if (!blacklist1_file || !whitelist_file) {
-        log_message(1, "%s: 错误: 必须指定 -1 <blacklist1> 和 -w <whitelist> 文件路径。\n", program_name);
+        log_message(1, "%s: 错误: 必须同时指定 -1 <blacklist1> 和 -w <whitelist> 文件路径。\n", program_name);
         print_help(program_name);
         fclose(log_file);
         return EXIT_FAILURE;
     }
     if (blacklist2_file && days <= 0) {
-        log_message(1, "%s: 错误: 当指定 -2 <blacklist2> 时，必须同时指定 -D <days> 且天数必须为正整数。\n", program_name);
+        log_message(1, "%s: 错误: 使用 -2 时必须同时设置 -D 且天数必须为正数。\n", program_name);
         print_help(program_name);
         fclose(log_file);
         return EXIT_FAILURE;
     }
 
     do {
-        time_t loop_start_time = time(NULL);
-        strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", localtime(&loop_start_time));
-        log_message(1, "\n循环开始时间: %s\n", time_str);
+        time_t loop_start = time(NULL);
+        strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", localtime(&loop_start));
+        log_message(1, "\n【循环开始】时间: %s\n", time_str);
 
         char **blacklist1 = NULL, **blacklist2 = NULL, **whitelist = NULL;
         int bl1_count = read_file_to_array(blacklist1_file, &blacklist1);
@@ -693,9 +709,8 @@ if (target_uid != -1) {
         int wl_count = read_file_to_array(whitelist_file, &whitelist);
 
         process_blacklist(blacklist1, bl1_count, whitelist, wl_count, 0, 0);
-        if (blacklist2_file) {
+        if (blacklist2_file)
             process_blacklist(blacklist2, bl2_count, whitelist, wl_count, 1, days);
-        }
 
         free_array(blacklist1, bl1_count);
         free_array(blacklist2, bl2_count);
@@ -707,14 +722,12 @@ if (target_uid != -1) {
         log_message(1, "%s 已删除目录数: %d\n", time_str, total_dirs_deleted);
 
         total_files_deleted = total_dirs_deleted = 0;
-
         if (seconds > 0) {
-            log_message(1, "等待 %d 秒后进行下一次循环...\n", seconds);
+            log_message(1, "等待 %d 秒后继续下一次循环...\n", seconds);
             sleep(seconds);
         } else {
-            log_message(1, "单次执行完成，程序退出。\n");
+            log_message(1, "执行完成，程序退出。\n");
         }
-
     } while (seconds > 0);
 
     fclose(log_file);
