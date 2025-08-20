@@ -4,7 +4,7 @@
   "license": "MIT",
   "scripts": {
     "dev": "parcel src/index.html",
-    "build": "parcel build src/index.html --no-source-maps"
+    "build": "parcel build src/index.html --no-source-maps --dist-dir ./dist --no-cache"
   },
   "dependencies": {
     "@popperjs/core": "^2.11.8",
@@ -16,9 +16,11 @@
     "inflight": "^1.0.6",
     "kernelsu": "^1.0.6",
     "mdb-ui-kit": "^8.1.0",
-    "parcel": "^2.13.3"
+    "parcel": "^2.13.3",
+    "vconsole": "^3.15.1"
   },
   "devDependencies": {
-    "@fullhuman/postcss-purgecss": "^7.0.2"
+    "@fullhuman/postcss-purgecss": "^7.0.2",
+    "@parcel/transformer-sass": "2.15.4"
   }
 }
