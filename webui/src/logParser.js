@@ -1,100 +1,68 @@
-/**
- * 解析日志内容
- * @param {string} logContent - 日志文件内容
- * @returns {Array} - 返回解析后的数据数组
- */
-export function parseLogContent(logContent) {
-    const lines = logContent.split('\n');
-    const dataByTimestamp = {}; // 按时间戳存储数据
+// logParser.js
+
+export function parseLogContent(ndjsonContent) {
+    if (!ndjsonContent || ndjsonContent.trim() === '') {
+        return [];
+    }
+
+    const parsedEntries = [];
+    const lines = ndjsonContent.split('\n');
 
     lines.forEach(line => {
-        // 提取时间戳（精确到秒）
-        const timestampMatch = line.match(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/);
-        if (!timestampMatch) return; // 如果时间戳不存在，跳过该行
+        if (line.trim() === '') return;
 
-        const timestamp = timestampMatch[0];
+        try {
+            const stats = JSON.parse(line);
+            if (!stats.timestamp || !stats.global_stats) return;
 
-        // 初始化当前时间戳的数据
-        if (!dataByTimestamp[timestamp]) {
-            dataByTimestamp[timestamp] = {
-                timestamp: timestamp, // 时间戳
-                date: timestamp.split(' ')[0], // 提取日期部分
-                deletedFiles: 0,
-                deletedDirs: 0,
-                dirtySegments: 0,
-                
+            const formattedTimestamp = stats.timestamp.replace('T', ' ').replace('Z', '');
+            
+            // 从 gc_trim_stats 对象中提取数据，如果不存在则默认为 0
+            const reclaimedSegments = (stats.gc_trim_stats && stats.gc_trim_stats.reclaimed_segments) 
+                                      ? stats.gc_trim_stats.reclaimed_segments 
+                                      : 0;
+
+            const parsedEntry = {
+                timestamp: formattedTimestamp,
+                date: stats.timestamp.split('T')[0],
+                deletedFiles: stats.global_stats.files_deleted || 0,
+                deletedDirs: stats.global_stats.dirs_deleted || 0,
+                dirtySegments: reclaimedSegments, // 将回收的脏段数赋给 dirtySegments
+                trimmedMB: stats.global_stats.megabytes_deleted || 0,
+                appStats: stats.app_stats || []
             };
-        }
+            parsedEntries.push(parsedEntry);
 
-        // 解析日志内容
-        if (line.includes('已删除文件数:')) {
-            const match = line.match(/已删除文件数:\s*(\d+)/);
-            if (match) {
-                dataByTimestamp[timestamp].deletedFiles += parseInt(match[1], 10);
-            }
-        } else if (line.includes('已删除目录数:')) {
-            const match = line.match(/已删除目录数:\s*(\d+)/);
-            if (match) {
-                dataByTimestamp[timestamp].deletedDirs += parseInt(match[1], 10);
-            }
-        } else if (line.includes('已回收') && line.includes('个脏段')) {
-            const match = line.match(/已回收\s*(\d+)\s*个脏段/);
-            if (match) {
-                dataByTimestamp[timestamp].dirtySegments += parseInt(match[1], 10);
-            }
-        } // 移除 裁剪数据解析
-        /* else if (line.includes('已裁剪') && line.includes('MB')) {
-            const match = line.match(/已裁剪\s*([\d.]+)\s*MB/);
-       if (match) {
-           dataByTimestamp[timestamp].trimmedMB += parseFloat(match[1]);
-       }
-        } */
+        } catch (error) {
+            console.error("解析 JSON 行失败:", error, "行内容:", line);
+        }
     });
 
-    // 将按时间戳存储的数据转换为数组
-    return Object.values(dataByTimestamp);
+    return parsedEntries;
 }
-/**
- * 更新 localStorage 中的数据
- * @param {Array} newData - 新解析的日志数据
- */
-export function updateLocalStorage(newData) {
-    const storedData = JSON.parse(localStorage.getItem('logData') || '[]');
 
-    // 将新数据按时间戳合并到存储的数据中
+export function updateLocalStorage(newData) {
+    if (!newData || newData.length === 0) return;
+
+    const storedData = JSON.parse(localStorage.getItem('logData') || '[]');
+    const dataMap = new Map(storedData.map(entry => [entry.timestamp, entry]));
+
     newData.forEach(newEntry => {
-        const existingEntry = storedData.find(entry => entry.timestamp === newEntry.timestamp);
-        if (existingEntry) {
-            // 如果时间戳已存在，更新数值（避免重复累加）
-            existingEntry.deletedFiles = newEntry.deletedFiles;
-            existingEntry.deletedDirs = newEntry.deletedDirs;
-            existingEntry.dirtySegments = newEntry.dirtySegments;
-            // 移除 existingEntry.trimmedMB = newEntry.trimmedMB;
-        } else {
-            // 否则添加新数据
-            storedData.push(newEntry);
-        }
+        dataMap.set(newEntry.timestamp, newEntry);
     });
 
-    // 只保留最近7天的数据
+    const combinedData = Array.from(dataMap.values());
     const cutoffDate = new Date();
-    cutoffDate.setDate(cutoffDate.getDate() - 6); // 保留7天内的数据
-    const filteredData = storedData.filter(entry => new Date(entry.date) >= cutoffDate);
+    cutoffDate.setDate(cutoffDate.getDate() - 6);
+    const filteredData = combinedData.filter(entry => new Date(entry.date) >= cutoffDate);
 
     localStorage.setItem('logData', JSON.stringify(filteredData));
 }
 
-/**
- * 获取 localStorage 中存储的数据
- * @returns {Array} - 返回存储的日志数据
- */
 export function getStoredData() {
     return JSON.parse(localStorage.getItem('logData') || '[]');
 }
 
-/**
- * 清除 localStorage 中的数据
- */
 export function clearStoredData() {
     localStorage.removeItem('logData');
 }

@@ -1,19 +1,40 @@
 @use './mdb5/src/scss/mdb.free.scss';
 
+// --- 全局和基础设置 ---
 body {
   background-color: #F2F2F2;
+  font-size: 1rem;
+  margin: 0;
+  padding: 0;
+}
+
+.container {
+  max-width: 960px;
+  margin-left: auto;
+  margin-right: auto;
+  padding-left: 15px;
+  padding-right: 15px;
+}
+
+h1, h5 {
+  font-size: clamp(1.5rem, 4vw, 2.5rem);
 }
 
 .card {
   border-radius: 15px;
   box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+  margin-bottom: 1.5rem;
+}
+
+.card-header h5 {
+  font-size: 1.25rem;
 }
 
 .log-content {
   height: 400px;
   overflow-y: auto;
-  background-color: #f8f9fa; /* 浅白色背景 */
-  color: #000; /* 黑色字体 */
+  background-color: #f8f9fa;
+  color: #000;
   padding: 10px;
   border-radius: 5px;
 }
@@ -23,49 +44,88 @@ body {
   font-weight: bold;
 }
 
-.btn {
-  margin-right: 10px; /* 调整按钮间距 */
-}
-
-/* 规则文件编辑按钮竖向排列 */
+/* --- 按钮组布局优化 --- */
+/* GC控制按钮 和 底部四个操作按钮 的父容器 */
 .d-flex {
-  display: flex;
+  flex-wrap: nowrap; /* 强制所有子项保持在同一行，不换行 */
+  gap: 0.5rem; /* 按钮之间的间距 */
 }
 
-.flex-column {
-  flex-direction: column;
+.btn {
+  flex-shrink: 1; /* 允许按钮在必要时收缩 */
+  min-width: 70px; /* 设置一个最小宽度，防止按钮被压得太小 */
+  padding: 0.5rem 0.5rem; /* 稍微减小内边距以适应小屏幕 */
+  font-size: 0.8rem; /* 稍微减小字体大小 */
+  white-space: normal; /* 允许按钮内的文本换行 */
+  line-height: 1.2; /* 调整行高 */
+  text-align: center; /* 确保换行后文本居中 */
 }
 
-.mb-3 {
-  margin-bottom: 1rem; /* 调整按钮间距 */
+#gc-control-btn {
+  flex-shrink: 0; /* 不允许这个按钮收缩 */
+  min-width: unset; /* 移除通用 min-width 限制，让其内容决定宽度 */
+  padding: 0.375rem 0.75rem; /* 恢复标准 btn-sm 的内边距 */
+  font-size: 0.875rem; /* 恢复标准 btn-sm 的字体大小 */
 }
 
-/* 日志文件按钮容器 */
-.card-footer .d-flex {
-  gap: 0.5rem; /* 按钮间距 */
+/* 底部四个按钮的居中 */
+/* d-flex justify-content-center 已经处理了居中 */
+/* 规则文件编辑按钮 - 保持网格布局 */
+.d-grid.gap-3 {
+  display: grid;
+  gap: 1rem;
 }
 
-/* 环形图容器 */
+/* --- 图表尺寸控制 --- */
 #segment-chart {
-  max-width: 200px; /* 缩小图形大小 */
-  max-height: 200px;
-  margin: 0 auto;
+  max-width: 100%;
+  max-height: 100%;
+}
+
+/* GC 状态样式 */
+#gc-status {
+  display: inline-block; /* 确保它能被 text-align: center 居中 */
+  white-space: normal;
+  line-height: 1.2;
+  font-size: 0.75rem;
+  padding: 0.4em 0.6em;
+  text-align: center;
 }
 
 #bar-chart {
-  max-width: 600px; /* 调整柱状图大小 */
-  max-height: 400px;
+  max-width: 100%;
+  height: 300px;
   margin: 0 auto;
 }
 
-/* 操作按钮一行显示 */
-.btn.flex-fill {
-  flex: 1;
+/* 应用清理详情标题 */
+#app-stats-title {
+  font-size: 1rem;
 }
 
-/* 深色模式样式 */
+/* 应用列表滚动包装器 */
+.app-stats-list-wrapper {
+    max-height: 220px;
+    overflow-y: auto;
+    border: 1px solid rgba(0, 0, 0, 0.125);
+    border-radius: .25rem;
+    margin-top: 1rem;
+}
+
+.list-group-item {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 0.8rem;
+}
+
+.list-group-item .text-truncate {
+  flex-grow: 1;
+  min-width: 0;
+}
+
+/* --- 深色模式样式 --- */
 @media (prefers-color-scheme: dark) {
-  // 定义深色模式变量
   body {
     --btn-border-dark: rgba(255, 255, 255, 0.15);
     --divider-dark: rgba(255, 255, 255, 0.1);
@@ -76,11 +136,10 @@ body {
     color: #cccccc;
   }
 
-  /* 通过 id 选择器定义字体颜色 */
   #edit-blacklist1,
   #edit-blacklist2,
   #edit-whitelist {
-    color: #E5E5E5; /* 白色字体 */
+    color: #E5E5E5;
   }
 
   .log-content {
@@ -116,11 +175,10 @@ body {
     box-shadow: 0 0 0 0.2rem rgba(0, 123, 255, 0.25);
   }
 
-  /* 调整日期选择框 */
   input[type="date"] {
-    background-color: #3a3a3a; /* 更浅的背景颜色 */
-    color: #e0e0e0; /* 浅色文本 */
-    border: 1px solid #555555; /* 更明显的边框颜色 */
+    background-color: #3a3a3a;
+    color: #e0e0e0;
+    border: 1px solid #555555;
   }
 
   .btn {
